@@ -316,6 +316,28 @@ def table_to_docx(markdown_text):
     return bio
 
 
+def clean_result_column(text):
+    """AI出力の結果列を後処理：OK説明文を強制除去してOK/●NGのみにする"""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('|') and not re.match(r'\|[\s\-|]+\|', stripped):
+            parts = stripped.split('|')
+            if len(parts) >= 3:
+                cell = parts[-2].strip()
+                # 「OK」で終わる表現はすべて「OK」に変換（「● ○○なし → OK」等）
+                if re.search(r'OK\s*$', cell):
+                    cell = 'OK'
+                # 「●」で始まらない表現も「OK」に変換
+                elif cell and not cell.startswith('●'):
+                    cell = 'OK'
+                parts[-2] = f' {cell} '
+                line = '|'.join(parts)
+        cleaned.append(line)
+    return '\n'.join(cleaned)
+
+
 def compute_weekly_summary(excel_text):
     """週次チェック項目（魚・豆腐・麺丼）をPythonで事前計算して返す"""
     fish_kw = ["サケ","サーモン","サバ","サワラ","タラ","アジ","イワシ","ブリ","カレイ",
@@ -426,18 +448,23 @@ AIは自分で再計算せず、必ず以下の結果をそのまま使用して
 
 【結果欄のルール（例外なし・絶対厳守）】
 
-パターン1：問題なし → 「OK」
-  - 「OK」の2文字だけ。それ以外は何も書かない。
-  - チェックした内容・理由・補足・括弧書きを一切付けない。
-  - 禁止例：「OK（対象外）」「●...あり/OK」「●...可」「● ゼリーあり/OK」
-    「●...問題なし」「● 魚なし（サバあり）」「● 魚なし（サバあり）→OK」
+結果欄は「NG理由を書く列」であって「OK理由・確認内容を書く列」ではない。
 
-パターン2：確定NGあり → 「● NG理由を簡潔に」
-  - 複数NGは「／」でつなぐ
+書いてよいのは2種類のみ：
+(1) 「OK」← 2文字のみ。何も追加しない
+(2) 「● NG理由」← NG理由のみ
 
-【中間表現は禁止】
-「要確認」「確認待ち」「確認事項」「可能性あり」などは書かない。
-OK か ● のどちらかのみ。
+【絶対禁止パターン一覧】
+× 「● ○○なし → OK」← 「なし」はNGがないということ。「OK」とだけ書け
+× 「● ○○対象外 → OK」← 対象外なら「OK」とだけ書け
+× 「● ソース・コンソメ2日連続なし → OK」← 禁止
+× 「木曜だがしめじ等なし → OK」← 禁止
+× 「太もやし対象外 → OK」← 禁止
+× 「● NG理由 / ○○なし → OK」← NGとOK説明を混ぜるな
+× 「OK（確認済み）」「OK（対象外）」「OK（問題なし）」← OKに何も付けるな
+× 「● 魚なし（サバあり）」← 矛盾表現禁止
+
+「なし」「対象外」「問題なし」「確認済み」「あり/OK」は結果欄に書かない。
 
 【週次チェックの記入方法】
 - 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
@@ -455,7 +482,7 @@ OK か ● のどちらかのみ。
         max_tokens=8000,
         messages=[{"role": "user", "content": prompt}],
     )
-    return message.content[0].text
+    return clean_result_column(message.content[0].text)
 
 
 with st.sidebar:
