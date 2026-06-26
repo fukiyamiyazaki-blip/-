@@ -1,4 +1,8 @@
 import re
+import json
+import base64
+import urllib.request
+import urllib.error
 import streamlit as st
 import streamlit.components.v1 as components
 import anthropic
@@ -16,6 +20,11 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
+
+GITHUB_OWNER = "fukiyamiyazaki-blip"
+GITHUB_REPO = "-"
+GITHUB_BRANCH = "main"
+GITHUB_RULES_PATH = "rules.txt"
 
 # Streamlit の C キーショートカット（キャッシュクリア）を無効化
 components.html("""
@@ -58,6 +67,54 @@ def get_api_key():
     except Exception:
         pass
     return ""
+
+
+def get_github_token():
+    try:
+        return st.secrets.get("GITHUB_TOKEN", "")
+    except Exception:
+        return ""
+
+
+def push_rules_to_github(text):
+    token = get_github_token()
+    if not token:
+        return False, "GitHubトークンが未設定です"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{GITHUB_RULES_PATH}"
+    )
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    }
+
+    # 現在のSHAを取得
+    req = urllib.request.Request(
+        api_url + f"?ref={GITHUB_BRANCH}", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sha = json.loads(resp.read())["sha"]
+    except Exception as e:
+        return False, f"GitHub取得エラー: {e}"
+
+    # ファイルを更新
+    payload = json.dumps({
+        "message": "ルール管理から更新",
+        "content": base64.b64encode(text.encode("utf-8")).decode("utf-8"),
+        "sha": sha,
+        "branch": GITHUB_BRANCH,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(api_url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req):
+            return True, "保存しました（GitHub反映済み）"
+    except Exception as e:
+        return False, f"GitHub更新エラー: {e}"
 
 
 def get_sheet_names(uploaded_file):
@@ -172,38 +229,27 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 | 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 豚肉2日連続 |
 | 9/2(水) | ごはん / サケのマーマレード焼き / 小松菜のごま和え / みそ汁 | ここア蒸しパン | OK |
 
-========================================
-# 結果欄のルール（例外なし・絶対厳守）
-========================================
-
-【記入できるのは以下の2パターンのみ】
+【結果欄のルール（例外なし・絶対厳守）】
 
 パターン1：問題なし → 「OK」
   - 「OK」の2文字だけ。それ以外は何も書かない。
   - チェックした内容・理由・補足・括弧書きを一切付けない。
-  - 例：「OK」← これだけ
   - 禁止例：「OK（対象外）」「●...あり/OK」「●...可」「● ゼリーあり/OK」
     「●...問題なし」「● 月曜にXXなし（該当外）」「バナナ（火曜は対象外）」
 
 パターン2：確定NGあり → 「● NG理由を簡潔に」
   - 複数NGは「／」でつなぐ
-  - 例：「● 豚肉3日連続／月曜に魚使用」
 
 【中間表現は禁止】
 「要確認」「確認待ち」「確認事項」「可能性あり」などは書かない。
 OK か ● のどちらかのみ。
 
-========================================
-# 週次チェックの記入方法
-========================================
+【週次チェックの記入方法】
 - 週の区切りは月曜〜土曜（この範囲外の日は別の週として扱う）
 - 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
 - 土曜が休日の場合は、その週最後の給食がある日の行に記入する
-- 例：9/7(月)〜9/13(土)の週に魚がなければ → 9/13(土)の行に「● 今週魚なし」
 
-========================================
-# その他のルール
-========================================
+【その他のルール】
 - 献立名はスラッシュ「/」でつなぐ
 - おやつがない日は空欄
 - 給食のない日（土日・祝日）は出力しない
@@ -285,7 +331,7 @@ if page == "📋 献立チェック":
 
 elif page == "⚙️ ルール管理":
     st.title("⚙️ ルール管理")
-    st.caption("チェックに使うルールを確認・編集できます。変更後は「保存」を押してください。")
+    st.caption("ルールを編集して「保存」を押すと、アプリとGitHubの両方に反映されます。")
 
     current = load_rules()
     edited = st.text_area("チェックルール", value=current, height=600)
@@ -294,7 +340,11 @@ elif page == "⚙️ ルール管理":
     with col1:
         if st.button("💾 保存", type="primary"):
             save_rules(edited)
-            st.success("保存しました！")
+            success, msg = push_rules_to_github(edited)
+            if success:
+                st.success(msg)
+            else:
+                st.warning(f"アプリには保存済みです。GitHub更新に失敗しました：{msg}")
     with col2:
         if st.button("🔄 元に戻す（最後の保存時点）"):
             st.rerun()
