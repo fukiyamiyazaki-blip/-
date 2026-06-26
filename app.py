@@ -12,16 +12,13 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
 
-
 def load_rules():
     if RULES_FILE.exists():
         return RULES_FILE.read_text(encoding="utf-8")
     return ""
 
-
 def save_rules(text):
     RULES_FILE.write_text(text, encoding="utf-8")
-
 
 def get_api_key():
     try:
@@ -32,7 +29,6 @@ def get_api_key():
         pass
     return ""
 
-
 def get_sheet_names(uploaded_file):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
     try:
@@ -41,7 +37,6 @@ def get_sheet_names(uploaded_file):
     except Exception as e:
         st.error(f"ファイルの読み込みに失敗しました: {e}")
         return []
-
 
 def excel_to_text(uploaded_file, sheet_name):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
@@ -57,7 +52,6 @@ def excel_to_text(uploaded_file, sheet_name):
         if any(cells):
             rows.append(f"行{i + 1}: " + " | ".join(cells))
     return "\n".join(rows)
-
 
 def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
     client = anthropic.Anthropic(api_key=api_key)
@@ -100,100 +94,3 @@ NG件数：X件
 ## 要確認（目視推奨）
 （AIでは確定判断が難しく、担当者に目視確認をお願いしたい項目のみ記載。なければ省略）
 """
-
-    message = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=8000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return message.content[0].text
-
-
-# ==============================
-# サイドバー
-# ==============================
-with st.sidebar:
-    st.title("🍱 献立チェックシステム")
-    st.markdown("---")
-    page = st.radio(
-        "ページを選択",
-        ["📋 献立チェック", "⚙️ ルール管理"],
-        label_visibility="collapsed",
-    )
-
-
-# ==============================
-# ページ：献立チェック
-# ==============================
-if page == "📋 献立チェック":
-    st.title("📋 献立チェック")
-
-    api_key = get_api_key()
-    if not api_key:
-        st.error("⚠️ APIキーが設定されていません。管理者にお問い合わせください。")
-
-    st.markdown("### 1. ファイルをアップロード")
-    uploaded = st.file_uploader(
-        "献立Excelファイル（.xls または .xlsx）",
-        type=["xls", "xlsx"],
-    )
-
-    if uploaded:
-        sheets = get_sheet_names(uploaded)
-        if sheets:
-            st.markdown("### 2. シートを選択")
-            selected_sheet = st.selectbox("シート", sheets)
-
-            st.markdown("### 3. チェック開始")
-            if st.button("✅ チェックを開始する", type="primary", disabled=not api_key):
-                rules = load_rules()
-                if not rules.strip():
-                    st.error("ルールファイルが空です。「ルール管理」ページでルールを設定してください。")
-                else:
-                    with st.spinner("Excelデータを読み込んでいます..."):
-                        uploaded.seek(0)
-                        excel_text = excel_to_text(uploaded, selected_sheet)
-
-                    with st.spinner("チェック中です。1〜2分ほどお待ちください..."):
-                        try:
-                            uploaded.seek(0)
-                            result = run_check(
-                                excel_text, rules, api_key, uploaded.name, selected_sheet
-                            )
-                            st.session_state["last_result"] = result
-                            st.session_state["last_filename"] = uploaded.name
-                        except Exception as e:
-                            st.error(f"エラーが発生しました: {e}")
-                            result = None
-
-            if st.session_state.get("last_result"):
-                st.markdown("---")
-                st.subheader("チェック結果")
-                st.markdown(st.session_state["last_result"])
-                fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
-                st.download_button(
-                    "📥 結果をテキストファイルで保存",
-                    data=st.session_state["last_result"],
-                    file_name=f"チェック結果_{fname}.txt",
-                    mime="text/plain",
-                )
-
-
-# ==============================
-# ページ：ルール管理
-# ==============================
-elif page == "⚙️ ルール管理":
-    st.title("⚙️ ルール管理")
-    st.caption("チェックに使うルールを確認・編集できます。変更後は「保存」を押してください。")
-
-    current = load_rules()
-    edited = st.text_area("チェックルール", value=current, height=600)
-
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("💾 保存", type="primary"):
-            save_rules(edited)
-            st.success("保存しました！")
-    with col2:
-        if st.button("🔄 元に戻す（最後の保存時点）"):
-            st.rerun()
