@@ -105,6 +105,21 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 - NGがない日は「OK」とだけ記入する（理由・説明・注釈は絶対に付けない）
 - NGがある日は「● 【内容】」（複数NGは「／」でつなぐ）
 - 給食のない日（土日・祝日）は出力しない
+
+テーブルの後に、必ず以下のセパレーターを1行で入れてください：
+===NG_SUMMARY===
+
+その後、確定NGと要確認事項のみを以下の形式で出力してください（余分なテキスト不要）：
+
+1. **日付**：NG理由 → NG
+2. **日付**：NG理由 → NG
+（確定NGがない場合はこのセクションは省略）
+
+**要確認事項**
+- 内容
+（要確認事項がない場合は「**要確認事項**」ごと省略）
+
+最後に「確定NG件数：X件」の1行のみ
 """
 
     message = client.messages.create(
@@ -169,11 +184,17 @@ if page == "📋 献立チェック":
             if st.session_state.get("last_result"):
                 st.markdown("---")
                 st.subheader("チェック結果")
-                st.markdown(st.session_state["last_result"])
+                raw = st.session_state["last_result"]
+                if "===NG_SUMMARY===" in raw:
+                    display_part, download_part = raw.split("===NG_SUMMARY===", 1)
+                else:
+                    display_part = raw
+                    download_part = raw
+                st.markdown(display_part)
                 fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
                 st.download_button(
                     "📥 結果をテキストファイルで保存",
-                    data=st.session_state["last_result"].encode("utf-8-sig"),
+                    data=download_part.strip().encode("utf-8-sig"),
                     file_name=f"チェック結果_{fname}.txt",
                     mime="text/plain",
                 )
