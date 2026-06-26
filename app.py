@@ -1,7 +1,12 @@
+import re
 import streamlit as st
+import streamlit.components.v1 as components
 import anthropic
 import pandas as pd
+from io import BytesIO
 from pathlib import Path
+from docx import Document
+from docx.shared import Pt, RGBColor, Cm
 
 st.set_page_config(
     page_title="献立チェックシステム",
@@ -12,16 +17,18 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
 
-# Ctrl+CでSteamlitのキャッシュクリアダイアログが出るのを防ぐ
-st.markdown("""
+# Ctrl+C でキャッシュクリアダイアログが出るのを防ぐ
+components.html("""
 <script>
-document.addEventListener('keydown', function(e) {
-    if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
-        e.stopPropagation();
-    }
-}, true);
+try {
+    parent.document.addEventListener('keydown', function(e) {
+        if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
+            e.stopImmediatePropagation();
+        }
+    }, true);
+} catch(err) {}
 </script>
-""", unsafe_allow_html=True)
+""", height=0, scrolling=False)
 
 
 def load_rules():
@@ -70,6 +77,67 @@ def excel_to_text(uploaded_file, sheet_name):
     return "\n".join(rows)
 
 
+def table_to_docx(markdown_text):
+    doc = Document()
+
+    # A4横向き・余白狭め
+    section = doc.sections[0]
+    section.page_width = Cm(29.7)
+    section.page_height = Cm(21.0)
+    section.left_margin = Cm(1.5)
+    section.right_margin = Cm(1.5)
+    section.top_margin = Cm(1.5)
+    section.bottom_margin = Cm(1.5)
+
+    lines = markdown_text.strip().split('\n')
+    table_lines = [
+        l for l in lines
+        if l.strip().startswith('|') and not re.match(r'\|[\s\-|]+\|', l.strip())
+    ]
+
+    if not table_lines:
+        doc.add_paragraph(markdown_text)
+        bio = BytesIO()
+        doc.save(bio)
+        bio.seek(0)
+        return bio
+
+    headers = [h.strip() for h in table_lines[0].split('|')[1:-1]]
+    rows = [[c.strip() for c in line.split('|')[1:-1]] for line in table_lines[1:]]
+    n_cols = len(headers)
+    rows = [r[:n_cols] + [''] * max(0, n_cols - len(r)) for r in rows]
+
+    table = doc.add_table(rows=1 + len(rows), cols=n_cols)
+    table.style = 'Table Grid'
+
+    # ヘッダー行
+    for i, h in enumerate(headers):
+        cell = table.rows[0].cells[i]
+        cell.text = h
+        para = cell.paragraphs[0]
+        if para.runs:
+            run = para.runs[0]
+            run.bold = True
+            run.font.size = Pt(10)
+
+    # データ行
+    for r_idx, row_data in enumerate(rows):
+        for c_idx, val in enumerate(row_data):
+            cell = table.rows[r_idx + 1].cells[c_idx]
+            cell.text = val
+            para = cell.paragraphs[0]
+            if para.runs:
+                run = para.runs[0]
+                run.font.size = Pt(9)
+                if c_idx == n_cols - 1 and val.startswith('●'):
+                    run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
+
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
     client = anthropic.Anthropic(api_key=api_key)
 
@@ -89,37 +157,24 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 {excel_text}
 
 ========================================
-# 出力形式
+# 出力形式（厳守）
 ========================================
-以下のマークダウンテーブルのみを出力してください。
-表の前後に説明文・注釈・ステップ結果・件数サマリー等は一切付けないでください。
+マークダウンテーブルのみを出力してください。テーブルの前後に文章・注釈・説明等は一切禁止です。
 
 | 日付 | 献立名 | おやつ | 結果 |
 |------|--------|--------|------|
-| 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 【理由を簡潔に】 |
+| 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 理由を簡潔に |
 | 9/2(水) | ごはん / サケのマーマレード焼き / ... | ここア蒸しパン | OK |
 
-ルール：
+【結果欄の記入ルール（絶対厳守）】
+- 問題なし → 「OK」の2文字のみ。括弧書き・理由・注釈・「対象外」「問題なし」「該当なし」「確認」などの語は絶対禁止
+- 確定NGあり → 「● 内容を簡潔に」（複数は「／」でつなぐ）
+- 「要確認」「確認待ち」などの中間表現も禁止。NGかOKの二択のみ
+
+【その他ルール】
 - 献立名はスラッシュ「/」でつなぐ
 - おやつがない日は空欄
-- NGがない日は「OK」とだけ記入する（理由・説明・注釈は絶対に付けない）
-- NGがある日は「● 【内容】」（複数NGは「／」でつなぐ）
 - 給食のない日（土日・祝日）は出力しない
-
-テーブルの後に、必ず以下のセパレーターを1行で入れてください：
-===NG_SUMMARY===
-
-その後、確定NGと要確認事項のみを以下の形式で出力してください（余分なテキスト不要）：
-
-1. **日付**：NG理由 → NG
-2. **日付**：NG理由 → NG
-（確定NGがない場合はこのセクションは省略）
-
-**要確認事項**
-- 内容
-（要確認事項がない場合は「**要確認事項**」ごと省略）
-
-最後に「確定NG件数：X件」の1行のみ
 """
 
     message = client.messages.create(
@@ -184,19 +239,15 @@ if page == "📋 献立チェック":
             if st.session_state.get("last_result"):
                 st.markdown("---")
                 st.subheader("チェック結果")
-                raw = st.session_state["last_result"]
-                if "===NG_SUMMARY===" in raw:
-                    display_part, download_part = raw.split("===NG_SUMMARY===", 1)
-                else:
-                    display_part = raw
-                    download_part = raw
-                st.markdown(display_part)
+                result_text = st.session_state["last_result"]
+                st.markdown(result_text)
                 fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
+                docx_data = table_to_docx(result_text)
                 st.download_button(
-                    "📥 結果をテキストファイルで保存",
-                    data=download_part.strip().encode("utf-8-sig"),
-                    file_name=f"チェック結果_{fname}.txt",
-                    mime="text/plain",
+                    "📥 結果をWordファイルで保存",
+                    data=docx_data,
+                    file_name=f"チェック結果_{fname}.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
 
 
