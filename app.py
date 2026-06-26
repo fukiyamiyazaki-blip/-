@@ -316,8 +316,76 @@ def table_to_docx(markdown_text):
     return bio
 
 
+def compute_weekly_summary(excel_text):
+    """週次チェック項目（魚・豆腐・麺丼）をPythonで事前計算して返す"""
+    fish_kw = ["サケ","サーモン","サバ","サワラ","タラ","アジ","イワシ","ブリ","カレイ",
+               "メカジキ","タイ","マグロ","カツオ","シシャモ","ほっけ","白身魚","ツナ"]
+    tofu_kw = ["木綿豆腐","焼き豆腐","厚揚げ","油揚げ","高野豆腐"]
+    noodle_kw = ["スパゲティ","うどん","めん","麺","そば","丼"]
+    dow = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+
+    # 構造化テキストから日付ごとのテキストを抽出
+    date_data = {}
+    current = None
+    for line in excel_text.split("\n"):
+        m = re.match(r'【(\d+/\d+\([月火水木金土日]\))】', line)
+        if m:
+            current = m.group(1)
+            date_data[current] = ""
+        elif current and (line.startswith("昼食:") or line.startswith("おやつ:") or line.startswith("材料:")):
+            date_data[current] += " " + line
+
+    if not date_data:
+        return ""
+
+    def week_key(ds):
+        m = re.search(r'/(\d+)\(([月火水木金土日])\)', ds)
+        if not m:
+            return -1
+        return int(m.group(1)) - dow.get(m.group(2), 0)
+
+    def day_num(ds):
+        m = re.search(r'/(\d+)\(', ds)
+        return int(m.group(1)) if m else 0
+
+    # 週ごとにグループ化
+    weeks = {}
+    for ds in date_data:
+        wk = week_key(ds)
+        weeks.setdefault(wk, []).append(ds)
+
+    lines = ["【週次チェック事前計算結果】（AIはこの結果をそのまま使用すること。自分で再計算しないこと）"]
+    wn = 1
+    for wk in sorted(weeks.keys()):
+        dates = sorted(weeks[wk], key=day_num)
+        start, end = dates[0], dates[-1]
+        fish, tofu, noodle = [], [], []
+        for ds in dates:
+            text = date_data[ds]
+            for kw in fish_kw:
+                if kw in text:
+                    fish.append(f"{kw}({ds})")
+                    break
+            for kw in tofu_kw:
+                if kw in text:
+                    tofu.append(f"{kw}({ds})")
+                    break
+            for kw in noodle_kw:
+                if kw in text:
+                    noodle.append(f"{kw}({ds})")
+                    break
+        fish_s = "あり: " + ", ".join(fish) if fish else "なし→NG"
+        tofu_s = "あり: " + ", ".join(tofu) if tofu else "なし→NG"
+        noodle_s = "あり: " + ", ".join(noodle) if noodle else "なし→NG"
+        lines.append(f"第{wn}週({start}〜{end}): 魚={fish_s} / 豆腐={tofu_s} / 麺丼={noodle_s}")
+        wn += 1
+
+    return "\n".join(lines)
+
+
 def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
     client = anthropic.Anthropic(api_key=api_key)
+    weekly_summary = compute_weekly_summary(excel_text)
 
     prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
 以下のチェックルールに従って、エクセルデータを厳密に確認してください。
@@ -339,6 +407,14 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 {excel_text}
 
 ========================================
+# 週次チェック事前計算結果（絶対使用すること）
+========================================
+魚・豆腐・麺丼の週次チェックはPythonで正確に計算済みです。
+AIは自分で再計算せず、必ず以下の結果をそのまま使用してください。
+
+{weekly_summary}
+
+========================================
 # 出力形式（絶対厳守）
 ========================================
 マークダウンテーブルのみを出力してください。テーブルの前後に文章・注釈・説明等は一切禁止です。
@@ -354,7 +430,7 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
   - 「OK」の2文字だけ。それ以外は何も書かない。
   - チェックした内容・理由・補足・括弧書きを一切付けない。
   - 禁止例：「OK（対象外）」「●...あり/OK」「●...可」「● ゼリーあり/OK」
-    「●...問題なし」「● 月曜にXXなし（該当外）」「バナナ（火曜は対象外）」
+    「●...問題なし」「● 魚なし（サバあり）」「● 魚なし（サバあり）→OK」
 
 パターン2：確定NGあり → 「● NG理由を簡潔に」
   - 複数NGは「／」でつなぐ
@@ -364,24 +440,9 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 OK か ● のどちらかのみ。
 
 【週次チェックの記入方法】
-- 週の区切りは月曜〜土曜（この範囲外の日は別の週として扱う）
-- 月初など最初の週に月曜がない場合も、最初の給食日〜最初の土曜日を1週間として扱う
 - 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
 - 土曜が休日の場合は、その週最後の給食がある日の行に記入する
-
-【週次チェックの実施手順（絶対厳守）】
-週次チェック（魚・豆腐・麺丼）は必ず以下の手順で行うこと：
-1. その週のすべての日付を確認する
-2. 各日付の【献立名】と【材料欄】の両方を走査する
-3. 以下の判定をする：
-   - 魚あり：献立名または材料欄に「サケ・サーモン・サバ・サワラ・タラ・アジ・イワシ・ブリ・カレイ・メカジキ・タイ・マグロ・カツオ・シシャモ・ほっけ・白身魚・ツナ」のいずれかが含まれる日が1日でもあればOK
-   - 豆腐あり：献立名または材料欄に「木綿豆腐・焼き豆腐・厚揚げ・油揚げ・高野豆腐」のいずれかが含まれる日が1日でもあればOK
-   - 麺丼あり：献立名にスパゲティ・うどん・めん・麺・そば・丼が含まれる日が1日でもあればOK
-
-【重要な例】
-- 「サワラのチーズ焼き」という献立名 → 材料欄になくてもその週は魚あり
-- 「高野豆腐の煮物」という献立名 → 材料欄になくてもその週は豆腐あり
-- 「油揚げ」がみそ汁の材料欄に入っている → その週は豆腐あり
+- 週次チェック事前計算結果で「あり」となっている週は、週次NGを絶対に書かない
 
 【その他のルール】
 - 献立名はスラッシュ「/」でつなぐ
