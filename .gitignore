@@ -1,0 +1,20 @@
+# APIキー・機密情報
+.env
+config.json
+secrets.toml
+
+# Streamlit secrets（ローカル用）
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# チェック対象Excelファイル（必要に応じてコメントアウト）
+# *.xls
+# *.xlsx

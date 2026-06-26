@@ -132,15 +132,130 @@ def excel_to_text(uploaded_file, sheet_name):
     df = pd.read_excel(
         uploaded_file, sheet_name=sheet_name, header=None, dtype=str, engine=engine
     )
-    rows = []
-    for i, row in df.iterrows():
-        cells = [
-            str(v).strip() if pd.notna(v) and str(v).strip() not in ("nan", "") else ""
-            for v in row
-        ]
-        if any(cells):
-            rows.append(f"行{i + 1}: " + " | ".join(cells))
-    return "\n".join(rows)
+    n_rows, n_cols = df.shape
+
+    def cell_val(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    # 日付行を全行から検索（「N日(曜)」パターンが3個以上ある行をブロック開始とする）
+    blocks = []  # list of (date_row_idx, {col: date_str})
+    for r in range(n_rows):
+        temp = {}
+        for c in range(n_cols):
+            v = cell_val(r, c)
+            if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+                temp[c] = v
+        if len(temp) >= 3:
+            blocks.append((r, temp))
+
+    # 日付構造が見つからない場合は行ごと出力にフォールバック
+    if not blocks:
+        rows = []
+        for i, row in df.iterrows():
+            cells = [
+                str(v).strip() if pd.notna(v) and str(v).strip() not in ("nan", "") else ""
+                for v in row
+            ]
+            if any(cells):
+                rows.append(f"行{i + 1}: " + " | ".join(cells))
+        return "\n".join(rows)
+
+    # 年月を抽出（例：「2026年09月」）
+    year_month = ""
+    month_num = ""
+    for r in range(min(10, n_rows)):
+        for c in range(min(10, n_cols)):
+            v = cell_val(r, c)
+            m = re.match(r'(\d{4})年(\d{2})月', v)
+            if m:
+                year_month = f"{m.group(1)}年{m.group(2)}月"
+                month_num = str(int(m.group(2)))
+                break
+        if year_month:
+            break
+
+    skip_vals = {"[昼]", "[午後]", "献立名", "材料", "日付"}
+
+    def is_valid_cell(v):
+        if not v or v in skip_vals:
+            return False
+        if v.startswith("※"):  # 注記・免責文を除外
+            return False
+        return True
+
+    lines = []
+    if year_month:
+        lines.append(f"# 献立データ {year_month}")
+        lines.append("")
+
+    for block_idx, (block_date_row, block_date_cols) in enumerate(blocks):
+        # ブロック終端（次のブロック開始行 or ファイル末尾）
+        block_end = blocks[block_idx + 1][0] if block_idx + 1 < len(blocks) else n_rows
+
+        # このブロック内の材料セクション開始行
+        block_mat_row = None
+        for r in range(block_date_row + 1, block_end):
+            for c in range(min(5, n_cols)):
+                if cell_val(r, c) == "材料":
+                    block_mat_row = r
+                    break
+            if block_mat_row is not None:
+                break
+
+        dish_end = block_mat_row if block_mat_row is not None else block_end
+
+        for col_c in sorted(block_date_cols.keys()):
+            raw_date = block_date_cols[col_c]
+            dm = re.match(r'(\d+)日\(([月火水木金土日])\)', raw_date)
+            if dm and month_num:
+                date_label = f"{month_num}/{dm.group(1)}({dm.group(2)})"
+            else:
+                date_label = raw_date
+
+            lines.append(f"【{date_label}】")
+
+            # [午後]マーカーの行を検索（その日付列の1列前に出現する）
+            afternoon_start = dish_end
+            if col_c > 0:
+                for r in range(block_date_row + 1, dish_end):
+                    if cell_val(r, col_c - 1) == "[午後]":
+                        afternoon_start = r
+                        break
+
+            # 昼食献立
+            lunch = []
+            for r in range(block_date_row + 1, afternoon_start):
+                v = cell_val(r, col_c)
+                if is_valid_cell(v):
+                    lunch.append(v)
+
+            # おやつ
+            snack = []
+            for r in range(afternoon_start, dish_end):
+                v = cell_val(r, col_c)
+                if is_valid_cell(v):
+                    snack.append(v)
+
+            # 材料（ブロック内のみ）
+            mats = []
+            if block_mat_row is not None:
+                for r in range(block_mat_row, block_end):
+                    v = cell_val(r, col_c)
+                    if is_valid_cell(v):
+                        mats.append(v)
+
+            if lunch:
+                lines.append(f"昼食: {' / '.join(lunch)}")
+            if snack:
+                lines.append(f"おやつ: {' / '.join(snack)}")
+            if mats:
+                lines.append(f"材料: {', '.join(mats)}")
+            lines.append("")
+
+    return "\n".join(lines)
 
 
 def table_to_docx(markdown_text):
@@ -215,7 +330,11 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 ========================================
 # エクセルデータ（ファイル：{file_name}　シート：{sheet_name}）
 ========================================
-各行は「行N: セル1 | セル2 | ...」の形式です。空白セルは空欄として表示しています。
+各日付のデータは以下の形式で整理されています：
+【月/日(曜日)】
+昼食: 献立名1 / 献立名2 / ...（昼食の献立。汁物も含む）
+おやつ: おやつ名1 / おやつ名2 / ...（午後のおやつ。「お菓子」は市販菓子類）
+材料: 材料名1, 材料名2, ...（その日の全材料。みそ汁の具など汁物の中身も含む）
 
 {excel_text}
 
@@ -246,8 +365,23 @@ OK か ● のどちらかのみ。
 
 【週次チェックの記入方法】
 - 週の区切りは月曜〜土曜（この範囲外の日は別の週として扱う）
+- 月初など最初の週に月曜がない場合も、最初の給食日〜最初の土曜日を1週間として扱う
 - 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
 - 土曜が休日の場合は、その週最後の給食がある日の行に記入する
+
+【週次チェックの実施手順（絶対厳守）】
+週次チェック（魚・豆腐・麺丼）は必ず以下の手順で行うこと：
+1. その週のすべての日付を確認する
+2. 各日付の【献立名】と【材料欄】の両方を走査する
+3. 以下の判定をする：
+   - 魚あり：献立名または材料欄に「サケ・サーモン・サバ・サワラ・タラ・アジ・イワシ・ブリ・カレイ・メカジキ・タイ・マグロ・カツオ・シシャモ・ほっけ・白身魚・ツナ」のいずれかが含まれる日が1日でもあればOK
+   - 豆腐あり：献立名または材料欄に「木綿豆腐・焼き豆腐・厚揚げ・油揚げ・高野豆腐」のいずれかが含まれる日が1日でもあればOK
+   - 麺丼あり：献立名にスパゲティ・うどん・めん・麺・そば・丼が含まれる日が1日でもあればOK
+
+【重要な例】
+- 「サワラのチーズ焼き」という献立名 → 材料欄になくてもその週は魚あり
+- 「高野豆腐の煮物」という献立名 → 材料欄になくてもその週は豆腐あり
+- 「油揚げ」がみそ汁の材料欄に入っている → その週は豆腐あり
 
 【その他のルール】
 - 献立名はスラッシュ「/」でつなぐ
