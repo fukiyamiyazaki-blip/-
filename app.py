@@ -17,15 +17,24 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
 
-# Ctrl+C でキャッシュクリアダイアログが出るのを防ぐ
+# Streamlit の C キーショートカット（キャッシュクリア）を無効化
 components.html("""
 <script>
 try {
-    parent.document.addEventListener('keydown', function(e) {
-        if (e.ctrlKey && (e.key === 'c' || e.key === 'C')) {
-            e.stopImmediatePropagation();
+    function blockCKey(e) {
+        if (e.key !== 'c' && e.key !== 'C') return;
+        var el = window.parent.document.activeElement;
+        if (el) {
+            var tag = el.tagName.toUpperCase();
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable) return;
         }
-    }, true);
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+    }
+    window.parent.document.addEventListener('keydown', blockCKey, true);
+    window.parent.document.addEventListener('keyup', blockCKey, true);
+    window.parent.addEventListener('keydown', blockCKey, true);
+    window.parent.addEventListener('keyup', blockCKey, true);
 } catch(err) {}
 </script>
 """, height=0, scrolling=False)
@@ -80,7 +89,6 @@ def excel_to_text(uploaded_file, sheet_name):
 def table_to_docx(markdown_text):
     doc = Document()
 
-    # A4横向き・余白狭め
     section = doc.sections[0]
     section.page_width = Cm(29.7)
     section.page_height = Cm(21.0)
@@ -110,7 +118,6 @@ def table_to_docx(markdown_text):
     table = doc.add_table(rows=1 + len(rows), cols=n_cols)
     table.style = 'Table Grid'
 
-    # ヘッダー行
     for i, h in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = h
@@ -120,7 +127,6 @@ def table_to_docx(markdown_text):
             run.bold = True
             run.font.size = Pt(10)
 
-    # データ行
     for r_idx, row_data in enumerate(rows):
         for c_idx, val in enumerate(row_data):
             cell = table.rows[r_idx + 1].cells[c_idx]
@@ -142,7 +148,7 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
     client = anthropic.Anthropic(api_key=api_key)
 
     prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
-以下のチェックルールに従って、エクセルデータを厳密に確認し、NGの項目をすべて洗い出してください。
+以下のチェックルールに従って、エクセルデータを厳密に確認してください。
 
 ========================================
 # チェックルール
@@ -157,21 +163,47 @@ def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
 {excel_text}
 
 ========================================
-# 出力形式（厳守）
+# 出力形式（絶対厳守）
 ========================================
 マークダウンテーブルのみを出力してください。テーブルの前後に文章・注釈・説明等は一切禁止です。
 
 | 日付 | 献立名 | おやつ | 結果 |
 |------|--------|--------|------|
-| 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 理由を簡潔に |
-| 9/2(水) | ごはん / サケのマーマレード焼き / ... | ここア蒸しパン | OK |
+| 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 豚肉2日連続 |
+| 9/2(水) | ごはん / サケのマーマレード焼き / 小松菜のごま和え / みそ汁 | ここア蒸しパン | OK |
 
-【結果欄の記入ルール（絶対厳守）】
-- 問題なし → 「OK」の2文字のみ。括弧書き・理由・注釈・「対象外」「問題なし」「該当なし」「確認」などの語は絶対禁止
-- 確定NGあり → 「● 内容を簡潔に」（複数は「／」でつなぐ）
-- 「要確認」「確認待ち」などの中間表現も禁止。NGかOKの二択のみ
+========================================
+# 結果欄のルール（例外なし・絶対厳守）
+========================================
 
-【その他ルール】
+【記入できるのは以下の2パターンのみ】
+
+パターン1：問題なし → 「OK」
+  - 「OK」の2文字だけ。それ以外は何も書かない。
+  - チェックした内容・理由・補足・括弧書きを一切付けない。
+  - 例：「OK」← これだけ
+  - 禁止例：「OK（対象外）」「●...あり/OK」「●...可」「● ゼリーあり/OK」
+    「●...問題なし」「● 月曜にXXなし（該当外）」「バナナ（火曜は対象外）」
+
+パターン2：確定NGあり → 「● NG理由を簡潔に」
+  - 複数NGは「／」でつなぐ
+  - 例：「● 豚肉3日連続／月曜に魚使用」
+
+【中間表現は禁止】
+「要確認」「確認待ち」「確認事項」「可能性あり」などは書かない。
+OK か ● のどちらかのみ。
+
+========================================
+# 週次チェックの記入方法
+========================================
+- 週の区切りは月曜〜土曜（この範囲外の日は別の週として扱う）
+- 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
+- 土曜が休日の場合は、その週最後の給食がある日の行に記入する
+- 例：9/7(月)〜9/13(土)の週に魚がなければ → 9/13(土)の行に「● 今週魚なし」
+
+========================================
+# その他のルール
+========================================
 - 献立名はスラッシュ「/」でつなぐ
 - おやつがない日は空欄
 - 給食のない日（土日・祝日）は出力しない
