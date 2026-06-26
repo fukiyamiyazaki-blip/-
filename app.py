@@ -30,7 +30,7 @@ def get_api_key():
             return key
     except Exception:
         pass
-    return st.session_state.get("api_key", "")
+    return ""
 
 
 def get_sheet_names(uploaded_file):
@@ -131,9 +131,6 @@ NG件数：X件
     return message.content[0].text
 
 
-# ==============================
-# サイドバー
-# ==============================
 with st.sidebar:
     st.title("🍱 献立チェックシステム")
     st.markdown("---")
@@ -142,28 +139,14 @@ with st.sidebar:
         ["📋 献立チェック", "⚙️ ルール管理"],
         label_visibility="collapsed",
     )
-    st.markdown("---")
-    with st.expander("🔑 APIキー設定"):
-        api_input = st.text_input(
-            "Claude APIキー",
-            value=st.session_state.get("api_key", ""),
-            type="password",
-            help="sk-ant-... で始まるキーを入力",
-        )
-        if api_input:
-            st.session_state["api_key"] = api_input
-            st.success("設定済み ✓")
 
 
-# ==============================
-# ページ：献立チェック
-# ==============================
 if page == "📋 献立チェック":
     st.title("📋 献立チェック")
 
     api_key = get_api_key()
     if not api_key:
-        st.warning("⚠️ 左サイドバーの「APIキー設定」からClaude APIキーを入力してください")
+        st.error("⚠️ APIキーが設定されていません。管理者にお問い合わせください。")
 
     st.markdown("### 1. ファイルをアップロード")
     uploaded = st.file_uploader(
@@ -197,7 +180,6 @@ if page == "📋 献立チェック":
                             st.session_state["last_filename"] = uploaded.name
                         except Exception as e:
                             st.error(f"エラーが発生しました: {e}")
-                            result = None
 
             if st.session_state.get("last_result"):
                 st.markdown("---")
@@ -212,9 +194,6 @@ if page == "📋 献立チェック":
                 )
 
 
-# ==============================
-# ページ：ルール管理
-# ==============================
 elif page == "⚙️ ルール管理":
     st.title("⚙️ ルール管理")
     st.caption("チェックに使うルールを確認・編集できます。変更後は「保存」を押してください。")
