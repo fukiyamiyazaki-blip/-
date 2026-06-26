@@ -318,6 +318,17 @@ def table_to_docx(markdown_text):
 
 def clean_result_column(text):
     """AI出力の結果列を後処理：OK説明文を強制除去してOK/●NGのみにする"""
+    # これらのいずれかを含む●セルは「実NGなし」とみなしてOKに変換
+    no_real_ng_patterns = [
+        r'OK\s*$',            # 末尾がOK（→OK、/ OKなど含む）
+        r'実NG[無な]し',      # 実NG無し / 実NGなし
+        r'NG[無な]し',        # NGなし / NG無し
+        r'OK扱い',            # OK扱い不可 / OK扱い等
+        r'問題[無な]し',      # 問題なし / 問題無し
+        r'許容$',             # 末尾が「許容」
+        r'対象外\s*$',        # 末尾が「対象外」
+    ]
+
     lines = text.split('\n')
     cleaned = []
     for line in lines:
@@ -326,12 +337,15 @@ def clean_result_column(text):
             parts = stripped.split('|')
             if len(parts) >= 3:
                 cell = parts[-2].strip()
-                # 「OK」で終わる表現はすべて「OK」に変換（「● ○○なし → OK」等）
-                if re.search(r'OK\s*$', cell):
+                # 「●」で始まらない表現は「OK」に変換
+                if cell and not cell.startswith('●'):
                     cell = 'OK'
-                # 「●」で始まらない表現も「OK」に変換
-                elif cell and not cell.startswith('●'):
-                    cell = 'OK'
+                elif cell:
+                    # 「●」で始まるが実NGなしを示すパターンが含まれる → OK
+                    for pat in no_real_ng_patterns:
+                        if re.search(pat, cell):
+                            cell = 'OK'
+                            break
                 parts[-2] = f' {cell} '
                 line = '|'.join(parts)
         cleaned.append(line)
