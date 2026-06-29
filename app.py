@@ -478,7 +478,9 @@ def clean_result_column(text):
                 parts[-2] = f' {cell} '
                 line = '|'.join(parts)
         cleaned.append(line)
-    return '\n'.join(cleaned)
+    result = '\n'.join(cleaned)
+    result = re.sub(r'<br\s*/?>', ' ／ ', result, flags=re.IGNORECASE)
+    return result
 
 
 def compute_all_python_ngs(excel_text):
