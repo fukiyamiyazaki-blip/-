@@ -394,17 +394,17 @@ def table_to_docx(markdown_text):
     doc = Document()
 
     section = doc.sections[0]
-    section.page_width = Cm(29.7)
-    section.page_height = Cm(21.0)
+    section.page_width = Cm(21.0)
+    section.page_height = Cm(29.7)
     section.left_margin = Cm(1.5)
     section.right_margin = Cm(1.5)
     section.top_margin = Cm(1.5)
     section.bottom_margin = Cm(1.5)
 
-    # 用紙サイズを A4横 として明示（w:code=9 がないとプリンター既定に依存する）
+    # 用紙サイズを A4縦 として明示
     pgSz = section._sectPr.find(_qn('w:pgSz'))
     if pgSz is not None:
-        pgSz.set(_qn('w:orient'), 'landscape')
+        pgSz.set(_qn('w:orient'), 'portrait')
         pgSz.set(_qn('w:code'), '9')
 
     lines = markdown_text.strip().split('\n')
@@ -427,24 +427,33 @@ def table_to_docx(markdown_text):
 
     table = doc.add_table(rows=1 + len(rows), cols=n_cols)
     table.style = 'Table Grid'
+    table.allow_autofit = False
+
+    # A4縦 本文幅 18cm を 4列に分配（日付 / 献立名 / おやつ / 結果）
+    COL_WIDTHS = [Cm(2.0), Cm(5.5), Cm(3.5), Cm(7.0)]
+    if n_cols != 4:
+        each = Cm(18.0 / n_cols)
+        COL_WIDTHS = [each] * n_cols
 
     for i, h in enumerate(headers):
         cell = table.rows[0].cells[i]
         cell.text = h
+        cell.width = COL_WIDTHS[i]
         para = cell.paragraphs[0]
         if para.runs:
             run = para.runs[0]
             run.bold = True
-            run.font.size = Pt(10)
+            run.font.size = Pt(9)
 
     for r_idx, row_data in enumerate(rows):
         for c_idx, val in enumerate(row_data):
             cell = table.rows[r_idx + 1].cells[c_idx]
             cell.text = val
+            cell.width = COL_WIDTHS[c_idx]
             para = cell.paragraphs[0]
             if para.runs:
                 run = para.runs[0]
-                run.font.size = Pt(9)
+                run.font.size = Pt(8)
                 if c_idx == n_cols - 1 and val.startswith('●'):
                     run.font.color.rgb = RGBColor(0xCC, 0x00, 0x00)
 
