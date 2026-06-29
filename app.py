@@ -459,7 +459,6 @@ def create_colored_excel(uploaded_file, sheet_name):
     def _fill(hex6):
         return PatternFill(fill_type='solid', fgColor=hex6)
 
-    FILL_RED    = _fill('FF6666')  # 朱色
     FILL_YELLOW = _fill('FFFF99')  # 黄色
     FILL_GREEN  = _fill('CCFFCC')  # 緑色
     FILL_ORANGE = _fill('FFD9AD')  # オレンジ色
@@ -467,10 +466,6 @@ def create_colored_excel(uploaded_file, sheet_name):
     FILL_CYAN   = _fill('CCFFFF')  # 水色
     FILL_PINK   = _fill('FFB3C6')  # ピンク色
 
-    DISH_RED_KW = (
-        ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '食パン', 'ロールパン']
-        + FISH_KW
-    )
     ING_COLOR_RULES = [
         (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], FILL_YELLOW),
         (['ほうれん草', '小松菜', 'チンゲン菜', 'グリンピース',
@@ -579,9 +574,8 @@ def create_colored_excel(uploaded_file, sheet_name):
         if len(temp) >= 3:
             blocks.append((r, temp))
 
-    # ─── 色付きセルの収集 ────────────────────────────────────
-    dish_cells = set()
-    ing_cells  = {}
+    # ─── 色付きセルの収集（材料欄のみ） ─────────────────────
+    ing_cells = {}
 
     for block_idx, (block_date_row, block_date_cols) in enumerate(blocks):
         block_end = (
@@ -597,15 +591,8 @@ def create_colored_excel(uploaded_file, sheet_name):
             if block_mat_row is not None:
                 break
 
-        dish_end = block_mat_row if block_mat_row is not None else block_end
-
-        for col_c in sorted(block_date_cols.keys()):
-            for r in range(block_date_row + 1, dish_end):
-                v = cell_val(r, col_c)
-                if v and any(kw in v for kw in DISH_RED_KW):
-                    dish_cells.add((r, col_c))
-
-            if block_mat_row is not None:
+        if block_mat_row is not None:
+            for col_c in sorted(block_date_cols.keys()):
                 for r in range(block_mat_row, block_end):
                     v = cell_val(r, col_c)
                     if not v:
@@ -616,8 +603,6 @@ def create_colored_excel(uploaded_file, sheet_name):
                             break
 
     # ─── 色を適用 ────────────────────────────────────────────
-    for r_idx, c_idx in dish_cells:
-        apply_fill(r_idx, c_idx, FILL_RED)
     for (r_idx, c_idx), fc in ing_cells.items():
         apply_fill(r_idx, c_idx, fc)
 
