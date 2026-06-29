@@ -12,6 +12,8 @@ from io import BytesIO
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
+from openpyxl import Workbook
+from openpyxl.styles import PatternFill
 
 try:
     import jpholiday
@@ -443,6 +445,119 @@ def table_to_docx(markdown_text):
     return bio
 
 
+def create_colored_excel(uploaded_file, sheet_name):
+    """
+    Excelを読み込み、食材カテゴリに応じてセルに色を付けた .xlsx を返す。
+    献立欄 朱色：麺・パン・魚（ツナ除く）
+    材料欄 黄/緑/オレンジ/紫/水色/ピンク
+    """
+    engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
+    df = pd.read_excel(
+        uploaded_file, sheet_name=sheet_name, header=None, dtype=str, engine=engine
+    )
+    n_rows, n_cols = df.shape
+
+    def cell_val(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    # ─── 色定義 ───────────────────────────────────────────────
+    def _fill(hex6):
+        return PatternFill(fill_type='solid', fgColor=hex6)
+
+    FILL_RED    = _fill('FF6666')  # 朱色（献立欄：麺・パン・魚）
+    FILL_YELLOW = _fill('FFFF99')  # 黄色
+    FILL_GREEN  = _fill('CCFFCC')  # 緑色
+    FILL_ORANGE = _fill('FFD9AD')  # オレンジ色
+    FILL_PURPLE = _fill('E6CCFF')  # 紫色
+    FILL_CYAN   = _fill('CCFFFF')  # 水色
+    FILL_PINK   = _fill('FFB3C6')  # ピンク色
+
+    DISH_RED_KW = (
+        ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '食パン', 'ロールパン']
+        + FISH_KW  # ツナは含まない
+    )
+    ING_COLOR_RULES = [
+        (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], FILL_YELLOW),
+        (['ほうれん草', '小松菜', 'チンゲン菜', 'グリンピース',
+          'いんげん', 'えだまめ', 'ブロッコリー', 'ピーマン'], FILL_GREEN),
+        (['木綿豆腐', '焼き豆腐', '油揚げ', '厚揚げ', '大豆'], FILL_ORANGE),
+        (['チーズ'], FILL_PURPLE),
+        (['ちくわ', 'かにかま', 'ツナ', '赤かまぼこ'], FILL_CYAN),
+        (['ロースハム', 'ベーコン', 'ウインナー'], FILL_PINK),
+    ]
+
+    # ─── ブロック検出（excel_to_text と同じロジック） ────────
+    blocks = []
+    for r in range(n_rows):
+        temp = {}
+        for c in range(n_cols):
+            v = cell_val(r, c)
+            if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+                temp[c] = v
+        if len(temp) >= 3:
+            blocks.append((r, temp))
+
+    # ─── 色付きセルの収集 ────────────────────────────────────
+    dish_cells = set()  # → FILL_RED
+    ing_cells  = {}     # → fill color
+
+    for block_idx, (block_date_row, block_date_cols) in enumerate(blocks):
+        block_end = (
+            blocks[block_idx + 1][0] if block_idx + 1 < len(blocks) else n_rows
+        )
+
+        block_mat_row = None
+        for r in range(block_date_row + 1, block_end):
+            for c in range(min(5, n_cols)):
+                if cell_val(r, c) == "材料":
+                    block_mat_row = r
+                    break
+            if block_mat_row is not None:
+                break
+
+        dish_end = block_mat_row if block_mat_row is not None else block_end
+
+        for col_c in sorted(block_date_cols.keys()):
+            # 献立セル（昼食＋おやつ）→ 朱色チェック
+            for r in range(block_date_row + 1, dish_end):
+                v = cell_val(r, col_c)
+                if v and any(kw in v for kw in DISH_RED_KW):
+                    dish_cells.add((r, col_c))
+
+            # 材料セル → 各色チェック
+            if block_mat_row is not None:
+                for r in range(block_mat_row, block_end):
+                    v = cell_val(r, col_c)
+                    if not v:
+                        continue
+                    for kw_list, fill_color in ING_COLOR_RULES:
+                        if any(kw in v for kw in kw_list):
+                            ing_cells[(r, col_c)] = fill_color
+                            break
+
+    # ─── openpyxl ワークブック生成 ───────────────────────────
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_name[:31]
+
+    for r_idx in range(n_rows):
+        for c_idx in range(n_cols):
+            v = cell_val(r_idx, c_idx)
+            cell = ws.cell(row=r_idx + 1, column=c_idx + 1, value=v or None)
+            if (r_idx, c_idx) in dish_cells:
+                cell.fill = FILL_RED
+            elif (r_idx, c_idx) in ing_cells:
+                cell.fill = ing_cells[(r_idx, c_idx)]
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def clean_result_column(text):
     """AI出力の結果列を後処理：OK説明文を強制除去してOK/●NGのみにする"""
     # これらのいずれかを含む●セルは「実NGなし」とみなしてOKに変換
@@ -840,7 +955,25 @@ if page == "📋 献立チェック":
             st.markdown("### 2. シートを選択")
             selected_sheet = st.selectbox("シート", sheets)
 
-            st.markdown("### 3. チェック開始")
+            st.markdown("### 3. 色付きExcel生成（目検用）")
+            if st.button("🎨 色付きExcel生成"):
+                with st.spinner("色付き処理中..."):
+                    uploaded.seek(0)
+                    colored = create_colored_excel(uploaded, selected_sheet)
+                    st.session_state["colored_excel"] = colored.getvalue()
+                    st.session_state["colored_fname"] = uploaded.name.rsplit(".", 1)[0]
+
+            if st.session_state.get("colored_excel"):
+                fname_c = st.session_state.get("colored_fname", "result")
+                st.download_button(
+                    "📥 色付きExcelをダウンロード",
+                    data=st.session_state["colored_excel"],
+                    file_name=f"色付き_{fname_c}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_colored",
+                )
+
+            st.markdown("### 4. チェック開始")
             if st.button("✅ チェックを開始する", type="primary", disabled=not api_key):
                 rules = load_rules()
                 if not rules.strip():
@@ -874,6 +1007,7 @@ if page == "📋 献立チェック":
                     data=docx_data,
                     file_name=f"チェック結果_{fname}.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    key="dl_word",
                 )
 
 
