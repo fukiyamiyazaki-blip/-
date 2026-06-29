@@ -12,8 +12,9 @@ from io import BytesIO
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import PatternFill
+from openpyxl.utils import get_column_letter
 
 try:
     import jpholiday
@@ -448,26 +449,17 @@ def table_to_docx(markdown_text):
 def create_colored_excel(uploaded_file, sheet_name):
     """
     Excelを読み込み、食材カテゴリに応じてセルに色を付けた .xlsx を返す。
-    献立欄 朱色：麺・パン・魚（ツナ除く）
-    材料欄 黄/緑/オレンジ/紫/水色/ピンク
+    .xlsx: load_workbook で全フォーマット（罫線・フォント・列幅等）を保持して色を追加。
+    .xls:  xlrd でデータ＋マージセルを取得し openpyxl で再構築してから色を追加。
     """
-    engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
-    df = pd.read_excel(
-        uploaded_file, sheet_name=sheet_name, header=None, dtype=str, engine=engine
-    )
-    n_rows, n_cols = df.shape
+    is_xls = uploaded_file.name.lower().endswith(".xls")
+    file_bytes = uploaded_file.read()
 
-    def cell_val(r, c):
-        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
-            return ""
-        v = str(df.iloc[r, c]).strip()
-        return "" if v in ("nan", "", "None") else v
-
-    # ─── 色定義 ───────────────────────────────────────────────
+    # ─── 色定義 ──────────────────────────────────────────────
     def _fill(hex6):
         return PatternFill(fill_type='solid', fgColor=hex6)
 
-    FILL_RED    = _fill('FF6666')  # 朱色（献立欄：麺・パン・魚）
+    FILL_RED    = _fill('FF6666')  # 朱色
     FILL_YELLOW = _fill('FFFF99')  # 黄色
     FILL_GREEN  = _fill('CCFFCC')  # 緑色
     FILL_ORANGE = _fill('FFD9AD')  # オレンジ色
@@ -477,7 +469,7 @@ def create_colored_excel(uploaded_file, sheet_name):
 
     DISH_RED_KW = (
         ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '食パン', 'ロールパン']
-        + FISH_KW  # ツナは含まない
+        + FISH_KW
     )
     ING_COLOR_RULES = [
         (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], FILL_YELLOW),
@@ -489,7 +481,94 @@ def create_colored_excel(uploaded_file, sheet_name):
         (['ロースハム', 'ベーコン', 'ウインナー'], FILL_PINK),
     ]
 
-    # ─── ブロック検出（excel_to_text と同じロジック） ────────
+    # ─── ワークブックのロード ─────────────────────────────────
+    if not is_xls:
+        # .xlsx: openpyxl で直接ロード → 全フォーマット保持
+        wb = load_workbook(BytesIO(file_bytes), data_only=True)
+        ws = wb[sheet_name]
+        n_rows = ws.max_row
+        n_cols = ws.max_column
+
+        def cell_val(r, c):
+            if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+                return ""
+            v = ws.cell(row=r + 1, column=c + 1).value
+            if v is None:
+                return ""
+            s = str(v).strip()
+            return "" if s in ("nan", "", "None") else s
+
+        def apply_fill(r, c, fill):
+            try:
+                ws.cell(row=r + 1, column=c + 1).fill = fill
+            except AttributeError:
+                pass  # マージセルの非先頭セルは無視
+
+    else:
+        # .xls: xlrd でデータ＋マージセルを取得 → openpyxl で再構築
+        import xlrd as _xlrd
+
+        xls_wb = _xlrd.open_workbook(file_contents=file_bytes)
+        xls_ws = xls_wb.sheet_by_name(sheet_name)
+        n_rows = xls_ws.nrows
+        n_cols = xls_ws.ncols
+
+        def cell_val(r, c):
+            if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+                return ""
+            v = xls_ws.cell_value(r, c)
+            if v is None:
+                return ""
+            s = str(v).strip()
+            return "" if s in ("nan", "", "None") else s
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = sheet_name[:31]
+
+        # 値をコピー
+        for r_idx in range(n_rows):
+            for c_idx in range(n_cols):
+                v = cell_val(r_idx, c_idx)
+                ws.cell(row=r_idx + 1, column=c_idx + 1, value=v or None)
+
+        # マージセルをコピー（xlrd: row_hi/col_hi は exclusive）
+        for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
+            try:
+                ws.merge_cells(
+                    start_row=row_lo + 1, start_column=col_lo + 1,
+                    end_row=row_hi,       end_column=col_hi,
+                )
+            except Exception:
+                pass
+
+        # 列幅をコピー（xlrd 2.x では取得できない場合あり）
+        try:
+            for c_idx in range(n_cols):
+                ci = xls_ws.colinfo_map.get(c_idx)
+                if ci and ci.width > 0:
+                    ws.column_dimensions[get_column_letter(c_idx + 1)].width = (
+                        ci.width / 256
+                    )
+        except Exception:
+            pass
+
+        # 行高さをコピー（xlrd 2.x では取得できない場合あり）
+        try:
+            for r_idx in range(n_rows):
+                ri = xls_ws.rowinfo_map.get(r_idx)
+                if ri and ri.height > 0:
+                    ws.row_dimensions[r_idx + 1].height = ri.height / 20
+        except Exception:
+            pass
+
+        def apply_fill(r, c, fill):
+            try:
+                ws.cell(row=r + 1, column=c + 1).fill = fill
+            except AttributeError:
+                pass
+
+    # ─── ブロック検出 ─────────────────────────────────────────
     blocks = []
     for r in range(n_rows):
         temp = {}
@@ -501,8 +580,8 @@ def create_colored_excel(uploaded_file, sheet_name):
             blocks.append((r, temp))
 
     # ─── 色付きセルの収集 ────────────────────────────────────
-    dish_cells = set()  # → FILL_RED
-    ing_cells  = {}     # → fill color
+    dish_cells = set()
+    ing_cells  = {}
 
     for block_idx, (block_date_row, block_date_cols) in enumerate(blocks):
         block_end = (
@@ -521,13 +600,11 @@ def create_colored_excel(uploaded_file, sheet_name):
         dish_end = block_mat_row if block_mat_row is not None else block_end
 
         for col_c in sorted(block_date_cols.keys()):
-            # 献立セル（昼食＋おやつ）→ 朱色チェック
             for r in range(block_date_row + 1, dish_end):
                 v = cell_val(r, col_c)
                 if v and any(kw in v for kw in DISH_RED_KW):
                     dish_cells.add((r, col_c))
 
-            # 材料セル → 各色チェック
             if block_mat_row is not None:
                 for r in range(block_mat_row, block_end):
                     v = cell_val(r, col_c)
@@ -538,19 +615,11 @@ def create_colored_excel(uploaded_file, sheet_name):
                             ing_cells[(r, col_c)] = fill_color
                             break
 
-    # ─── openpyxl ワークブック生成 ───────────────────────────
-    wb = Workbook()
-    ws = wb.active
-    ws.title = sheet_name[:31]
-
-    for r_idx in range(n_rows):
-        for c_idx in range(n_cols):
-            v = cell_val(r_idx, c_idx)
-            cell = ws.cell(row=r_idx + 1, column=c_idx + 1, value=v or None)
-            if (r_idx, c_idx) in dish_cells:
-                cell.fill = FILL_RED
-            elif (r_idx, c_idx) in ing_cells:
-                cell.fill = ing_cells[(r_idx, c_idx)]
+    # ─── 色を適用 ────────────────────────────────────────────
+    for r_idx, c_idx in dish_cells:
+        apply_fill(r_idx, c_idx, FILL_RED)
+    for (r_idx, c_idx), fc in ing_cells.items():
+        apply_fill(r_idx, c_idx, fc)
 
     bio = BytesIO()
     wb.save(bio)
