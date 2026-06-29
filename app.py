@@ -389,6 +389,8 @@ def excel_to_text(uploaded_file, sheet_name):
 
 
 def table_to_docx(markdown_text):
+    from docx.oxml.ns import qn as _qn
+
     doc = Document()
 
     section = doc.sections[0]
@@ -398,6 +400,12 @@ def table_to_docx(markdown_text):
     section.right_margin = Cm(1.5)
     section.top_margin = Cm(1.5)
     section.bottom_margin = Cm(1.5)
+
+    # 用紙サイズを A4横 として明示（w:code=9 がないとプリンター既定に依存する）
+    pgSz = section._sectPr.find(_qn('w:pgSz'))
+    if pgSz is not None:
+        pgSz.set(_qn('w:orient'), 'landscape')
+        pgSz.set(_qn('w:code'), '9')
 
     lines = markdown_text.strip().split('\n')
     table_lines = [
