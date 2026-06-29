@@ -700,6 +700,26 @@ def compute_all_python_ngs(excel_text):
             if 'クリームシチュー' in lunch(ds):
                 day_ngs[ds].append('● 5〜9月クリームシチューNG')
 
+    # ── 料理名から推定される必須材料チェック ─────────────────
+    # (料理名に含む文字列, 材料欄に必要なキーワードのいずれか)
+    RECIPE_RULES = [
+        ('おかか',   ['かつお節', 'おかか']),
+        ('ごま和え', ['白ごま', '黒ごま', 'すりごま', 'ごま']),
+        ('あんかけ', ['片栗粉']),
+        ('から揚げ', ['片栗粉']),
+        ('唐揚げ',   ['片栗粉']),
+        ('照り焼き', ['みりん', '醤油']),
+        ('蒸しパン', ['ベーキングパウダー', 'BP', '重曹']),
+    ]
+    for ds in sorted_dates:
+        ls_text = lunch(ds) + ' ' + snack(ds)
+        i_text  = ing(ds)
+        for kw, required_any in RECIPE_RULES:
+            if kw in ls_text:
+                if not any(req in i_text for req in required_any):
+                    missing = '・'.join(required_any)
+                    day_ngs[ds].append(f'● 「{kw}」があるが材料に{missing}なし')
+
     # ── 出力テキスト生成 ──────────────────────────────────────
     lines = [
         '【Python確定NGリスト】',
