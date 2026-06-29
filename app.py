@@ -100,7 +100,8 @@ def _split_ing(ing_text):
     parts = re.split(r'[,、]', ing_text)
     result = []
     for part in parts:
-        for token in re.split(r'[\s　・／/]+', part.strip()):
+        # 半角・全角カッコも区切り文字として扱う
+        for token in re.split(r'[\s　・／/()（）]+', part.strip()):
             t = token.strip()
             if t and t not in ('nan', ''):
                 result.append(t)
@@ -147,6 +148,7 @@ def _parse_structured(excel_text):
 _EXEMPT_EXACT = {
     '白米', 'しょうが', 'にんにく', 'みそ', '酢', '白ごま',
     '人参', '玉ねぎ', '鶏肉', '豚肉', '牛肉', 'ひき肉',
+    '昆布', 'かつお',  # 天然だし(かつお・昆布) をカッコ分割した際の破片を免除
 }
 # 2日連続チェック免除（部分一致：これを含むトークンは免除）
 _EXEMPT_SUB = ['醤油', '砂糖', 'みりん', '酒', '塩', '油',
