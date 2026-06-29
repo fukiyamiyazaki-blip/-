@@ -1,6 +1,7 @@
 import re
 import json
 import base64
+import datetime
 import urllib.request
 import urllib.error
 import streamlit as st
@@ -11,6 +12,12 @@ from io import BytesIO
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
+
+try:
+    import jpholiday
+    HAS_JPHOLIDAY = True
+except ImportError:
+    HAS_JPHOLIDAY = False
 
 st.set_page_config(
     page_title="献立チェックシステム",
@@ -57,6 +64,124 @@ def load_rules():
 
 def save_rules(text):
     RULES_FILE.write_text(text, encoding="utf-8")
+
+
+# ─────────────────────────────────────────────
+# Python事前計算用ヘルパー
+# ─────────────────────────────────────────────
+
+def _parse_date(ds, year):
+    m = re.match(r'(\d+)/(\d+)\(', ds)
+    if not m:
+        return None
+    try:
+        return datetime.date(year, int(m.group(1)), int(m.group(2)))
+    except ValueError:
+        return None
+
+
+def _dow(ds):
+    """月=0 … 日=6"""
+    m = re.search(r'\(([月火水木金土日])\)', ds)
+    return "月火水木金土日".index(m.group(1)) if m else -1
+
+
+def _is_holiday(d):
+    if not HAS_JPHOLIDAY or d is None:
+        return False
+    try:
+        return bool(jpholiday.is_holiday(d))
+    except Exception:
+        return False
+
+
+def _split_ing(ing_text):
+    """材料テキストを個別トークンに分割"""
+    parts = re.split(r'[,、]', ing_text)
+    result = []
+    for part in parts:
+        for token in re.split(r'[\s　・／/]+', part.strip()):
+            t = token.strip()
+            if t and t not in ('nan', ''):
+                result.append(t)
+    return result
+
+
+def _parse_structured(excel_text):
+    """
+    excel_text を日付ごとの構造体に変換。
+    Returns: (year, month_num, sorted_dates, entries)
+      entries[date_str] = {'lunch': str, 'snack': str, 'ingredients': str}
+    """
+    year, month_num = 0, 0
+    ym = re.search(r'(\d{4})年(\d+)月', excel_text)
+    if ym:
+        year, month_num = int(ym.group(1)), int(ym.group(2))
+
+    entries, current = {}, None
+    for line in excel_text.split('\n'):
+        dm = re.match(r'【(\d+/\d+\([月火水木金土日]\))】', line)
+        if dm:
+            current = dm.group(1)
+            entries[current] = {'lunch': '', 'snack': '', 'ingredients': ''}
+        elif current:
+            if line.startswith('昼食:'):
+                entries[current]['lunch'] = line[3:].strip()
+            elif line.startswith('おやつ:'):
+                entries[current]['snack'] = line[4:].strip()
+            elif line.startswith('材料:'):
+                entries[current]['ingredients'] = line[3:].strip()
+
+    sorted_dates = sorted(
+        entries.keys(),
+        key=lambda ds: (_parse_date(ds, year) or datetime.date.max)
+    )
+    return year, month_num, sorted_dates, entries
+
+
+# ─────────────────────────────────────────────
+# チェック用定数
+# ─────────────────────────────────────────────
+
+# 2日連続チェック免除（完全一致）
+_EXEMPT_EXACT = {
+    '白米', 'しょうが', 'にんにく', 'みそ', '酢', '白ごま',
+    '人参', '玉ねぎ', '鶏肉', '豚肉', '牛肉', 'ひき肉',
+}
+# 2日連続チェック免除（部分一致：これを含むトークンは免除）
+_EXEMPT_SUB = ['醤油', '砂糖', 'みりん', '酒', '塩', '油',
+               'だし', 'ごま', '水', '片栗粉', '小麦粉']
+# 調味料独自チェックで管理するもの（汎用2日連続から除外）
+_SEASONING_HANDLED = {'シャンタン', '中華だし', 'コンソメ', 'カレー', 'ソース', 'チーズ'}
+
+
+def _is_exempt(token):
+    if token in _EXEMPT_EXACT or token in _SEASONING_HANDLED:
+        return True
+    return any(s in token for s in _EXEMPT_SUB)
+
+
+SEASONING_2DAY = ['シャンタン', '中華だし', 'コンソメ', 'カレー', 'ソース']
+MEAT_3DAY      = ['豚肉', '鶏肉', '牛肉', 'ひき肉']
+IMO_KW         = ['じゃが芋', 'さつま芋', '里芋', 'かぼちゃ']
+NERIMONO_KW    = ['ちくわ', 'かにかま', '赤かまぼこ']
+FISH_KW        = ['サケ', 'サーモン', 'サバ', 'サワラ', 'タラ', 'アジ', 'イワシ',
+                  'ブリ', 'カレイ', 'メカジキ', 'タイ', 'マグロ', 'カツオ',
+                  'シシャモ', 'ほっけ', '白身魚']
+FISH_WITH_TUNA = FISH_KW + ['ツナ']
+TOFU_KW        = ['木綿豆腐', '焼き豆腐', '厚揚げ', '油揚げ', '高野豆腐']
+NOODLE_KW      = ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '丼']
+MUSHROOM_KW    = ['しめじ', 'エリンギ', 'えのき', 'なめこ']
+MON_NG_ITEMS   = ['ロールパン', '食パン', 'りんご', 'バナナ', 'オレンジ',
+                  '太もやし', '切干大根', 'ひじき', '高野豆腐']
+PREP_KW        = [
+    '玉ねぎ', '人参', '白菜', '焼き豆腐', 'かぼちゃ', '大根', 'いんげん',
+    'えのき', 'キャベツ', 'じゃが芋', '里芋', '厚揚げ', 'しめじ', 'れんこん',
+    '木綿豆腐', 'なめこ', 'エリンギ', 'ちくわ', '板こんにゃく', '糸こんにゃく',
+    'さつま芋', 'ごぼう', 'ささがきごぼう', 'にら', 'マッシュルーム',
+    'きゅうり', 'トマト', 'なす', '春雨', '切干大根', 'ロースハム',
+    'ウインナー', 'たけのこ', 'アスパラガス',
+]
 
 
 def get_api_key():
@@ -354,143 +479,304 @@ def clean_result_column(text):
     return '\n'.join(cleaned)
 
 
-def compute_weekly_summary(excel_text):
-    """週次チェック項目（魚・豆腐・麺丼）をPythonで事前計算して返す"""
-    fish_kw = ["サケ","サーモン","サバ","サワラ","タラ","アジ","イワシ","ブリ","カレイ",
-               "メカジキ","タイ","マグロ","カツオ","シシャモ","ほっけ","白身魚","ツナ"]
-    tofu_kw = ["木綿豆腐","焼き豆腐","厚揚げ","油揚げ","高野豆腐"]
-    noodle_kw = ["スパゲティ","うどん","めん","麺","そば","丼"]
-    dow = {"月": 0, "火": 1, "水": 2, "木": 3, "金": 4, "土": 5, "日": 6}
+def compute_all_python_ngs(excel_text):
+    """
+    全ルールベースNGをPythonで計算。
+    Returns: (summary_text, day_ngs_dict)
+      summary_text  … AIプロンプトに埋め込むNG一覧テキスト
+      day_ngs_dict  … {date_str: [ng_str, ...]}
+    """
+    year, month_num, sorted_dates, entries = _parse_structured(excel_text)
+    if not sorted_dates:
+        return "", {}
 
-    # 構造化テキストから日付ごとのテキストを抽出
-    date_data = {}
-    current = None
-    for line in excel_text.split("\n"):
-        m = re.match(r'【(\d+/\d+\([月火水木金土日]\))】', line)
-        if m:
-            current = m.group(1)
-            date_data[current] = ""
-        elif current and (line.startswith("昼食:") or line.startswith("おやつ:") or line.startswith("材料:")):
-            date_data[current] += " " + line
+    day_ngs = {ds: [] for ds in sorted_dates}
 
-    if not date_data:
-        return ""
+    def ing(ds):
+        return entries[ds]['ingredients']
 
-    def week_key(ds):
-        m = re.search(r'/(\d+)\(([月火水木金土日])\)', ds)
-        if not m:
-            return -1
-        return int(m.group(1)) - dow.get(m.group(2), 0)
+    def lunch(ds):
+        return entries[ds]['lunch']
 
-    def day_num(ds):
-        m = re.search(r'/(\d+)\(', ds)
-        return int(m.group(1)) if m else 0
+    def snack(ds):
+        return entries[ds]['snack']
 
-    # 週ごとにグループ化
+    def has(text, kw_list):
+        return any(kw in text for kw in kw_list)
+
+    # ── 禁止食材 ────────────────────────────────────────────────
+    for ds in sorted_dates:
+        for f in ['卵', 'マヨネーズ', '絹ごし豆腐']:
+            if f in ing(ds):
+                day_ngs[ds].append(f'● {f}（使用禁止食材）')
+
+    # ── チーズ2日連続 ──────────────────────────────────────────
+    for i in range(1, len(sorted_dates)):
+        if 'チーズ' in ing(sorted_dates[i]) and 'チーズ' in ing(sorted_dates[i-1]):
+            day_ngs[sorted_dates[i]].append('● チーズ類2日連続')
+
+    # ── 肉類3日連続 ────────────────────────────────────────────
+    for meat in MEAT_3DAY:
+        for i in range(2, len(sorted_dates)):
+            if all(meat in ing(sorted_dates[j]) for j in (i, i-1, i-2)):
+                day_ngs[sorted_dates[i]].append(f'● {meat}3日連続')
+
+    # ── 調味料2日連続（日祝を挟めばOK） ──────────────────────
+    for seasoning in SEASONING_2DAY:
+        for i in range(1, len(sorted_dates)):
+            ds_c, ds_p = sorted_dates[i], sorted_dates[i-1]
+            if seasoning in ing(ds_c) and seasoning in ing(ds_p):
+                d_c, d_p = _parse_date(ds_c, year), _parse_date(ds_p, year)
+                exempted = False
+                if d_c and d_p:
+                    d = d_p + datetime.timedelta(days=1)
+                    while d < d_c:
+                        if d.weekday() == 6 or _is_holiday(d):
+                            exempted = True
+                            break
+                        d += datetime.timedelta(days=1)
+                if not exempted:
+                    day_ngs[ds_c].append(f'● {seasoning}2日連続')
+
+    # ── 芋類3日連続 ────────────────────────────────────────────
+    for i in range(2, len(sorted_dates)):
+        if all(has(ing(sorted_dates[j]), IMO_KW) for j in (i, i-1, i-2)):
+            day_ngs[sorted_dates[i]].append('● 芋類3日連続')
+
+    # ── 汎用食材2日連続（免除リスト以外） ────────────────────
+    for i in range(1, len(sorted_dates)):
+        ds_c, ds_p = sorted_dates[i], sorted_dates[i-1]
+        toks_c = {t for t in _split_ing(ing(ds_c)) if not _is_exempt(t) and len(t) >= 2}
+        toks_p = {t for t in _split_ing(ing(ds_p)) if not _is_exempt(t) and len(t) >= 2}
+        for token in sorted(toks_c & toks_p):
+            day_ngs[ds_c].append(f'● {token}2日連続')
+
+    # ── 同日チェック ───────────────────────────────────────────
+    for ds in sorted_dates:
+        i_text = ing(ds)
+        toks = _split_ing(i_text)
+
+        # 芋類2種類以上（同日）
+        imo_cnt = sum(1 for kw in IMO_KW if kw in i_text)
+        if imo_cnt >= 2:
+            day_ngs[ds].append(f'● 同日芋類{imo_cnt}種類（1種類のみ可）')
+
+        # 酢2回以上
+        if toks.count('酢') >= 2:
+            day_ngs[ds].append('● 同日「酢」2回使用')
+
+        # みそ2回以上
+        if toks.count('みそ') >= 2:
+            day_ngs[ds].append('● 同日「みそ」2回使用')
+
+        # ほうれん草＋小松菜
+        if 'ほうれん草' in i_text and '小松菜' in i_text:
+            day_ngs[ds].append('● 同日「ほうれん草」と「小松菜」重複')
+
+        # 練り物2種類以上
+        neri_cnt = sum(1 for kw in NERIMONO_KW if kw in i_text)
+        if neri_cnt >= 2:
+            day_ngs[ds].append(f'● 同日練り物{neri_cnt}種類（1種類のみ可）')
+
+        # 玉ねぎ3回以上
+        tama_cnt = toks.count('玉ねぎ')
+        if tama_cnt >= 3:
+            day_ngs[ds].append(f'● 同日「玉ねぎ」{tama_cnt}回使用')
+
+        # 人参3回以上
+        ninj_cnt = toks.count('人参')
+        if ninj_cnt >= 3:
+            day_ngs[ds].append(f'● 同日「人参」{ninj_cnt}回使用')
+
+    # ── 月上限（4回目に到達した日に記録） ─────────────────────
+    for item in ['バター', 'チーズ', 'マヨドレ']:
+        found = [ds for ds in sorted_dates if item in ing(ds)]
+        if len(found) >= 4:
+            day_ngs[found[3]].append(f'● {item}月4回目（上限超過）')
+
+    # ── 月曜・祝日翌日チェック ────────────────────────────────
+    for ds in sorted_dates:
+        dow_i = _dow(ds)
+        d = _parse_date(ds, year)
+        is_mon = (dow_i == 0)
+        prev_holiday = _is_holiday(d - datetime.timedelta(days=1)) if d else False
+        is_mon_or_post = is_mon or prev_holiday
+        is_thu = (dow_i == 3)
+        i_text = ing(ds)
+        ls_text = lunch(ds) + ' ' + snack(ds)
+
+        if is_mon_or_post:
+            for item in MON_NG_ITEMS:
+                if item in i_text:
+                    day_ngs[ds].append(f'● 月曜/祝日翌日「{item}」NG')
+            for m_kw in MUSHROOM_KW:
+                if m_kw in i_text:
+                    day_ngs[ds].append(f'● 月曜/祝日翌日「{m_kw}」NG')
+                    break
+            for fish_kw in FISH_KW:   # ツナはOKなので FISH_KW（ツナなし）を使う
+                if fish_kw in i_text:
+                    day_ngs[ds].append(f'● 月曜/祝日翌日「{fish_kw}」使用NG')
+                    break
+            # 月曜/祝日翌日に照り焼き・から揚げ・フライ
+            for dish in ['照り焼き', 'から揚げ', 'フライ']:
+                if dish in ls_text:
+                    check = ls_text.replace('フライドポテト', '') if dish == 'フライ' else ls_text
+                    if dish in check:
+                        day_ngs[ds].append(f'● 月曜/祝日翌日「{dish}」NG')
+
+        # にら・青ねぎ：月曜・祝日翌日・木曜がNG
+        if is_mon_or_post or is_thu:
+            for nk in ['にら', '青ねぎ']:
+                if nk in i_text:
+                    day_ngs[ds].append(f'● 月曜/祝日翌日/木曜「{nk}」NG')
+
+    # ── 週次チェック（魚・豆腐・麺丼） ──────────────────────
+    _dow_map = {'月': 0, '火': 1, '水': 2, '木': 3, '金': 4, '土': 5, '日': 6}
+
+    def _week_key(ds):
+        m2 = re.search(r'/(\d+)\(([月火水木金土日])\)', ds)
+        return int(m2.group(1)) - _dow_map.get(m2.group(2), 0) if m2 else -1
+
     weeks = {}
-    for ds in date_data:
-        wk = week_key(ds)
-        weeks.setdefault(wk, []).append(ds)
+    for ds in sorted_dates:
+        weeks.setdefault(_week_key(ds), []).append(ds)
 
-    lines = ["【週次チェック事前計算結果】（AIはこの結果をそのまま使用すること。自分で再計算しないこと）"]
-    wn = 1
-    for wk in sorted(weeks.keys()):
-        dates = sorted(weeks[wk], key=day_num)
-        start, end = dates[0], dates[-1]
-        fish, tofu, noodle = [], [], []
-        for ds in dates:
-            text = date_data[ds]
-            for kw in fish_kw:
-                if kw in text:
-                    fish.append(f"{kw}({ds})")
-                    break
-            for kw in tofu_kw:
-                if kw in text:
-                    tofu.append(f"{kw}({ds})")
-                    break
-            for kw in noodle_kw:
-                if kw in text:
-                    noodle.append(f"{kw}({ds})")
-                    break
-        fish_s = "あり: " + ", ".join(fish) if fish else "なし→NG"
-        tofu_s = "あり: " + ", ".join(tofu) if tofu else "なし→NG"
-        noodle_s = "あり: " + ", ".join(noodle) if noodle else "なし→NG"
-        lines.append(f"第{wn}週({start}〜{end}): 魚={fish_s} / 豆腐={tofu_s} / 麺丼={noodle_s}")
-        wn += 1
+    for _, week_dates in sorted(weeks.items()):
+        wd = sorted(week_dates, key=lambda d: _parse_date(d, year) or datetime.date.max)
+        last = wd[-1]
+        combined = ' '.join(lunch(ds) + ' ' + ing(ds) for ds in wd)
 
-    return "\n".join(lines)
+        if not has(combined, FISH_WITH_TUNA):
+            day_ngs[last].append('● 今週魚なし（週1回以上必要）')
+
+        tofu_ok = any(
+            has(ing(ds), TOFU_KW) or has(lunch(ds), TOFU_KW)
+            for ds in wd
+        )
+        if not tofu_ok:
+            day_ngs[last].append('● 今週豆腐なし（週1回以上必要）')
+
+        if not has(combined, NOODLE_KW):
+            day_ngs[last].append('● 今週麺・丼なし（週1回以上必要）')
+
+    # ── 仕込み食材7種類以上 ───────────────────────────────────
+    for ds in sorted_dates:
+        i_text = ing(ds)
+        found = [kw for kw in PREP_KW if kw in i_text]
+        if len(found) >= 7:
+            day_ngs[ds].append(f'● 仕込み食材{len(found)}種類（7種類以上）: {", ".join(found)}')
+
+    # ── 月の献立回数上限 ──────────────────────────────────────
+    ingenge_days = [ds for ds in sorted_dates if 'いんげん' in (lunch(ds) + snack(ds))]
+    fruit_days   = [ds for ds in sorted_dates if '果物' in (lunch(ds) + snack(ds))]
+    if len(ingenge_days) >= 3:
+        day_ngs[ingenge_days[2]].append('● 「いんげん」献立が月3回目（上限超過）')
+    if len(fruit_days) >= 2:
+        day_ngs[fruit_days[1]].append('● 「果物」献立が月2回目（上限超過）')
+
+    # ── 土曜日に麺・丼なし ───────────────────────────────────
+    for ds in sorted_dates:
+        if _dow(ds) == 5 and not has(lunch(ds), NOODLE_KW):
+            day_ngs[ds].append('● 土曜日に麺・丼なし')
+
+    # ── ハンバーグ/フライ前日おやつゼリーなし ────────────────
+    for i in range(1, len(sorted_dates)):
+        ds_today, ds_next = sorted_dates[i-1], sorted_dates[i]
+        l_next = lunch(ds_next)
+        need_jelly = 'ハンバーグ' in l_next
+        if not need_jelly and 'フライ' in l_next:
+            if 'フライ' in l_next.replace('フライドポテト', ''):
+                need_jelly = True
+        if need_jelly and 'ゼリー' not in snack(ds_today):
+            day_ngs[ds_today].append(
+                f'● 翌日({ds_next})ハンバーグ/フライだが前日おやつにゼリーなし'
+            )
+
+    # ── 季節チェック（クリームシチュー） ─────────────────────
+    if 5 <= month_num <= 9:
+        for ds in sorted_dates:
+            if 'クリームシチュー' in lunch(ds):
+                day_ngs[ds].append('● 5〜9月クリームシチューNG')
+
+    # ── 出力テキスト生成 ──────────────────────────────────────
+    lines = [
+        '【Python確定NGリスト】',
+        '（AIはこの結果をそのまま採用。自分で再計算・再判断しないこと）',
+        '',
+    ]
+    has_any = False
+    for ds in sorted_dates:
+        for ng in day_ngs[ds]:
+            lines.append(f'{ds}: {ng}')
+            has_any = True
+    if not has_any:
+        lines.append('（ルールベースのNG検出なし）')
+
+    return '\n'.join(lines), day_ngs
 
 
 def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
     client = anthropic.Anthropic(api_key=api_key)
-    weekly_summary = compute_weekly_summary(excel_text)
+    python_ng_text, _ = compute_all_python_ngs(excel_text)
 
     prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
-以下のチェックルールに従って、エクセルデータを厳密に確認してください。
-
-========================================
-# チェックルール
-========================================
-{rules_text}
+担当は「ステップ４：献立名と材料の照合チェック」のみです。
+その他の全ルール（連続使用・禁止食材・週次・月上限など）はPythonが計算済みです。
 
 ========================================
 # エクセルデータ（ファイル：{file_name}　シート：{sheet_name}）
 ========================================
-各日付のデータは以下の形式で整理されています：
 【月/日(曜日)】
-昼食: 献立名1 / 献立名2 / ...（昼食の献立。汁物も含む）
-おやつ: おやつ名1 / おやつ名2 / ...（午後のおやつ。「お菓子」は市販菓子類）
-材料: 材料名1, 材料名2, ...（その日の全材料。みそ汁の具など汁物の中身も含む）
+昼食: 献立名1 / 献立名2 / ...
+おやつ: おやつ名1 / ...
+材料: 材料名1, 材料名2, ...
 
 {excel_text}
 
 ========================================
-# 週次チェック事前計算結果（絶対使用すること）
+# Python確定NGリスト（必ず結果欄に転記すること）
 ========================================
-魚・豆腐・麺丼の週次チェックはPythonで正確に計算済みです。
-AIは自分で再計算せず、必ず以下の結果をそのまま使用してください。
+以下は全ルールをPythonで計算済みの確定NGです。
+AIは再計算せず、そのまま結果欄に記入してください。
 
-{weekly_summary}
+{python_ng_text}
+
+========================================
+# あなたが担当するチェック（ステップ４のみ）
+========================================
+【献立名と材料の照合チェック】
+同じ日の【献立名】と【材料】を照らし合わせ、
+献立名に入っている食材が材料欄にない場合はNG。
+
+例外（NG対象外）：
+・「ごはん」「おにぎり」→ 白米があればOK
+・「チキン」「鶏」→ 鶏肉があればOK
+・「すまし汁」「スープ」→ 食材なくてOK
+・「ゼリー」→ 食材なくてOK
+・「ごぼう」→ ささがきごぼうがあればOK
 
 ========================================
 # 出力形式（絶対厳守）
 ========================================
-マークダウンテーブルのみを出力してください。テーブルの前後に文章・注釈・説明等は一切禁止です。
+マークダウンテーブルのみ。前後に文章・注釈禁止。
 
 | 日付 | 献立名 | おやつ | 結果 |
 |------|--------|--------|------|
-| 9/1(火) | ごはん / 豚肉のポン酢炒め / もやしごま和え / みそ汁 | ツナトースト | ● 豚肉2日連続 |
-| 9/2(水) | ごはん / サケのマーマレード焼き / 小松菜のごま和え / みそ汁 | ここア蒸しパン | OK |
 
-【結果欄のルール（例外なし・絶対厳守）】
+【結果欄のルール】
+・Python確定NGがある日 → そのNGをそのまま記入（複数なら改行で並べる）
+・ステップ４でNGが見つかった日 → 「● ○○が材料欄にない」を追記
+・どちらもなければ → 「OK」の2文字のみ
 
-結果欄は「NG理由を書く列」であって「OK理由・確認内容を書く列」ではない。
+【絶対禁止】
+× Python確定NGにないルールベースNGを自分で書く
+× 「OK（確認済み）」「● ○○なし → OK」などOK説明文
+× テーブル以外の文章
 
-書いてよいのは2種類のみ：
-(1) 「OK」← 2文字のみ。何も追加しない
-(2) 「● NG理由」← NG理由のみ
-
-【絶対禁止パターン一覧】
-× 「● ○○なし → OK」← 「なし」はNGがないということ。「OK」とだけ書け
-× 「● ○○対象外 → OK」← 対象外なら「OK」とだけ書け
-× 「● ソース・コンソメ2日連続なし → OK」← 禁止
-× 「木曜だがしめじ等なし → OK」← 禁止
-× 「太もやし対象外 → OK」← 禁止
-× 「● NG理由 / ○○なし → OK」← NGとOK説明を混ぜるな
-× 「OK（確認済み）」「OK（対象外）」「OK（問題なし）」← OKに何も付けるな
-× 「● 魚なし（サバあり）」← 矛盾表現禁止
-
-「なし」「対象外」「問題なし」「確認済み」「あり/OK」は結果欄に書かない。
-
-【週次チェックの記入方法】
-- 週次チェック（魚なし・豆腐なし・麺丼なし）のNGは、その週の土曜日の行に記入する
-- 土曜が休日の場合は、その週最後の給食がある日の行に記入する
-- 週次チェック事前計算結果で「あり」となっている週は、週次NGを絶対に書かない
-
-【その他のルール】
-- 献立名はスラッシュ「/」でつなぐ
-- おやつがない日は空欄
-- 給食のない日（土日・祝日）は出力しない
+【その他】
+・献立名はスラッシュ「/」でつなぐ
+・おやつがない日は空欄
+・給食のない日は出力しない
 """
 
     message = client.messages.create(
