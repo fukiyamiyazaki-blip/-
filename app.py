@@ -898,6 +898,8 @@ def compute_all_python_ngs(excel_text):
         ('唐揚げ',   ['片栗粉']),
         ('照り焼き', ['みりん', '醤油']),
         ('蒸しパン', ['ベーキングパウダー', 'BP', '重曹']),
+        ('味噌汁',   ['みそ']),
+        ('みそ汁',   ['みそ']),
     ]
     for ds in sorted_dates:
         ls_text = lunch(ds) + ' ' + snack(ds)
@@ -907,6 +909,25 @@ def compute_all_python_ngs(excel_text):
                 if not any(req in i_text for req in required_any):
                     missing = '・'.join(required_any)
                     day_ngs[ds].append(f'● 「{kw}」があるが材料に{missing}なし')
+
+    # ── おすまし・おすいものに「みそ」あり ─────────────────────
+    for ds in sorted_dates:
+        ls_text = lunch(ds) + ' ' + snack(ds)
+        if ('おすまし' in ls_text or 'おすいもの' in ls_text) and 'みそ' in ing(ds):
+            day_ngs[ds].append('● 「おすまし/おすいもの」があるが材料に「みそ」あり（不要）')
+
+    # ── 料理名に含まれない魚が材料にあるチェック ────────────────
+    # 「白身魚」は総称なので除外（白身魚のフライ→材料にタラ等があっても正常）
+    _specific_fish = [f for f in FISH_KW if f != '白身魚']
+    for ds in sorted_dates:
+        ls_text = lunch(ds) + ' ' + snack(ds)
+        i_text  = ing(ds)
+        dish_fish = [f for f in _specific_fish if f in ls_text]
+        ing_fish  = [f for f in _specific_fish if f in i_text]
+        if dish_fish:
+            for f in ing_fish:
+                if f not in dish_fish:
+                    day_ngs[ds].append(f'● 材料に「{f}」があるが献立名に対応する料理なし（不要食材？）')
 
     # ── 出力テキスト生成 ──────────────────────────────────────
     lines = [
