@@ -724,11 +724,11 @@ def table_to_docx(markdown_text):
     return bio
 
 
-def create_colored_excel(uploaded_file, sheet_name):
+def create_colored_excel(uploaded_file):
     """
-    Excelを読み込み、食材カテゴリに応じてセルに色を付けた .xlsx を返す。
-    .xlsx: load_workbook で全フォーマット（罫線・フォント・列幅等）を保持して色を追加。
-    .xls:  xlrd でデータ＋マージセルを取得し openpyxl で再構築してから色を追加。
+    全シートを色付きにして .xlsx で返す。フォーマット自動検出により
+    さかえ・おおみや・ゆめのはな・既存形式それぞれの材料列に色付け。
+    .xls はデータ・マージセルを再構築（書式は一部失われる）。
     """
     is_xls = uploaded_file.name.lower().endswith(".xls")
     file_bytes = uploaded_file.read()
@@ -737,152 +737,173 @@ def create_colored_excel(uploaded_file, sheet_name):
     def _fill(hex6):
         return PatternFill(fill_type='solid', fgColor=hex6)
 
-    FILL_YELLOW = _fill('FFFF99')  # 黄色
-    FILL_GREEN  = _fill('CCFFCC')  # 緑色
-    FILL_ORANGE = _fill('FFD9AD')  # オレンジ色
-    FILL_PURPLE = _fill('E6CCFF')  # 紫色
-    FILL_CYAN   = _fill('CCFFFF')  # 水色
-    FILL_PINK   = _fill('FFB3C6')  # ピンク色
-
     ING_COLOR_RULES = [
-        (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], FILL_YELLOW),
+        (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], _fill('FFFF99')),
         (['ほうれん草', '小松菜', 'チンゲン菜', 'グリンピース',
-          'いんげん', 'えだまめ', 'ブロッコリー', 'ピーマン'], FILL_GREEN),
-        (['木綿豆腐', '焼き豆腐', '油揚げ', '厚揚げ', '大豆'], FILL_ORANGE),
-        (['チーズ'], FILL_PURPLE),
-        (['ちくわ', 'かにかま', 'ツナ', '赤かまぼこ'], FILL_CYAN),
-        (['ロースハム', 'ベーコン', 'ウインナー'], FILL_PINK),
+          'いんげん', 'えだまめ', 'ブロッコリー', 'ピーマン'],      _fill('CCFFCC')),
+        (['木綿豆腐', '焼き豆腐', '油揚げ', '厚揚げ', '大豆'],      _fill('FFD9AD')),
+        (['チーズ'],                                                  _fill('E6CCFF')),
+        (['ちくわ', 'かにかま', 'ツナ', '赤かまぼこ'],               _fill('CCFFFF')),
+        (['ロースハム', 'ベーコン', 'ウインナー'],                    _fill('FFB3C6')),
     ]
 
-    # ─── ワークブックのロード ─────────────────────────────────
+    # ─── フォーマット別の色付けロジック ──────────────────────
+    def _apply_colors(cv_fn, af_fn, n_rows, n_cols, fmt):
+        """cv_fn(r,c)→str、af_fn(r,c,fill)→None を使って色付け"""
+        if fmt == 'sakae':
+            # 列3-6が材料
+            for r in range(n_rows):
+                for c in range(3, min(7, n_cols)):
+                    v = cv_fn(r, c)
+                    if not v:
+                        continue
+                    for kw_list, fc in ING_COLOR_RULES:
+                        if any(kw in v for kw in kw_list):
+                            af_fn(r, c, fc)
+                            break
+        elif fmt == 'omiya':
+            # 列2が全材料（1セル）
+            for r in range(n_rows):
+                v = cv_fn(r, 2)
+                if not v:
+                    continue
+                for kw_list, fc in ING_COLOR_RULES:
+                    if any(kw in v for kw in kw_list):
+                        af_fn(r, 2, fc)
+                        break
+        elif fmt == 'yumehana':
+            # 列3-9が材料
+            for r in range(n_rows):
+                for c in range(3, min(10, n_cols)):
+                    v = cv_fn(r, c)
+                    if not v:
+                        continue
+                    for kw_list, fc in ING_COLOR_RULES:
+                        if any(kw in v for kw in kw_list):
+                            af_fn(r, c, fc)
+                            break
+        else:
+            # 既存形式: 「N日(曜)」横並びブロック検出
+            blocks = []
+            for r in range(n_rows):
+                temp = {}
+                for c in range(n_cols):
+                    v = cv_fn(r, c)
+                    if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+                        temp[c] = v
+                if len(temp) >= 3:
+                    blocks.append((r, temp))
+            for b_idx, (b_row, b_cols) in enumerate(blocks):
+                b_end = blocks[b_idx + 1][0] if b_idx + 1 < len(blocks) else n_rows
+                mat_row = None
+                for r in range(b_row + 1, b_end):
+                    for c in range(min(5, n_cols)):
+                        if cv_fn(r, c) == "材料":
+                            mat_row = r
+                            break
+                    if mat_row is not None:
+                        break
+                if mat_row is None:
+                    continue
+                for col_c in sorted(b_cols.keys()):
+                    for r in range(mat_row, b_end):
+                        v = cv_fn(r, col_c)
+                        if not v:
+                            continue
+                        for kw_list, fc in ING_COLOR_RULES:
+                            if any(kw in v for kw in kw_list):
+                                af_fn(r, col_c, fc)
+                                break
+
+    # ─── .xlsx ───────────────────────────────────────────────
     if not is_xls:
-        # .xlsx: openpyxl で直接ロード → 全フォーマット保持
         wb = load_workbook(BytesIO(file_bytes), data_only=True)
-        ws = wb[sheet_name]
-        n_rows = ws.max_row
-        n_cols = ws.max_column
+        for sh_name in wb.sheetnames:
+            ws = wb[sh_name]
+            n_rows, n_cols = ws.max_row, ws.max_column
+            df_sh = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
+                                  header=None, dtype=str, engine='openpyxl')
+            fmt = _detect_sheet_format(df_sh)
 
-        def cell_val(r, c):
-            if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
-                return ""
-            v = ws.cell(row=r + 1, column=c + 1).value
-            if v is None:
-                return ""
-            s = str(v).strip()
-            return "" if s in ("nan", "", "None") else s
+            def _cv(r, c, _ws=ws):
+                if r < 0 or r >= _ws.max_row or c < 0 or c >= _ws.max_column:
+                    return ""
+                v = _ws.cell(row=r + 1, column=c + 1).value
+                return "" if v is None else ("" if str(v).strip() in ("nan", "", "None") else str(v).strip())
 
-        def apply_fill(r, c, fill):
-            try:
-                ws.cell(row=r + 1, column=c + 1).fill = fill
-            except AttributeError:
-                pass  # マージセルの非先頭セルは無視
+            def _af(r, c, fill, _ws=ws):
+                try:
+                    _ws.cell(row=r + 1, column=c + 1).fill = fill
+                except AttributeError:
+                    pass
 
+            _apply_colors(_cv, _af, n_rows, n_cols, fmt)
+
+    # ─── .xls ────────────────────────────────────────────────
     else:
-        # .xls: xlrd でデータ＋マージセルを取得 → openpyxl で再構築
         import xlrd as _xlrd
-
         xls_wb = _xlrd.open_workbook(file_contents=file_bytes)
-        xls_ws = xls_wb.sheet_by_name(sheet_name)
-        n_rows = xls_ws.nrows
-        n_cols = xls_ws.ncols
-
-        def cell_val(r, c):
-            if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
-                return ""
-            v = xls_ws.cell_value(r, c)
-            if v is None:
-                return ""
-            s = str(v).strip()
-            return "" if s in ("nan", "", "None") else s
-
         wb = Workbook()
-        ws = wb.active
-        ws.title = sheet_name[:31]
+        first = True
+        for sh_name in xls_wb.sheet_names():
+            xls_ws = xls_wb.sheet_by_name(sh_name)
+            n_rows, n_cols = xls_ws.nrows, xls_ws.ncols
+            if first:
+                ws = wb.active
+                ws.title = sh_name[:31]
+                first = False
+            else:
+                ws = wb.create_sheet(title=sh_name[:31])
 
-        # 値をコピー
-        for r_idx in range(n_rows):
-            for c_idx in range(n_cols):
-                v = cell_val(r_idx, c_idx)
-                ws.cell(row=r_idx + 1, column=c_idx + 1, value=v or None)
+            # 値をコピー
+            for r_i in range(n_rows):
+                for c_i in range(n_cols):
+                    v = xls_ws.cell_value(r_i, c_i)
+                    if v is not None and str(v).strip() not in ("nan", "", "None"):
+                        ws.cell(row=r_i + 1, column=c_i + 1, value=str(v).strip() or None)
 
-        # マージセルをコピー（xlrd: row_hi/col_hi は exclusive）
-        for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
+            # マージセルをコピー
+            for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
+                try:
+                    ws.merge_cells(start_row=row_lo + 1, start_column=col_lo + 1,
+                                   end_row=row_hi, end_column=col_hi)
+                except Exception:
+                    pass
+
+            # 列幅・行高さ
             try:
-                ws.merge_cells(
-                    start_row=row_lo + 1, start_column=col_lo + 1,
-                    end_row=row_hi,       end_column=col_hi,
-                )
+                for c_i in range(n_cols):
+                    ci = xls_ws.colinfo_map.get(c_i)
+                    if ci and ci.width > 0:
+                        ws.column_dimensions[get_column_letter(c_i + 1)].width = ci.width / 256
+            except Exception:
+                pass
+            try:
+                for r_i in range(n_rows):
+                    ri = xls_ws.rowinfo_map.get(r_i)
+                    if ri and ri.height > 0:
+                        ws.row_dimensions[r_i + 1].height = ri.height / 20
             except Exception:
                 pass
 
-        # 列幅をコピー（xlrd 2.x では取得できない場合あり）
-        try:
-            for c_idx in range(n_cols):
-                ci = xls_ws.colinfo_map.get(c_idx)
-                if ci and ci.width > 0:
-                    ws.column_dimensions[get_column_letter(c_idx + 1)].width = (
-                        ci.width / 256
-                    )
-        except Exception:
-            pass
+            # フォーマット検出
+            df_sh = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
+                                  header=None, dtype=str, engine='xlrd')
+            fmt = _detect_sheet_format(df_sh)
 
-        # 行高さをコピー（xlrd 2.x では取得できない場合あり）
-        try:
-            for r_idx in range(n_rows):
-                ri = xls_ws.rowinfo_map.get(r_idx)
-                if ri and ri.height > 0:
-                    ws.row_dimensions[r_idx + 1].height = ri.height / 20
-        except Exception:
-            pass
+            def _cv(r, c, _xws=xls_ws):
+                if r < 0 or r >= _xws.nrows or c < 0 or c >= _xws.ncols:
+                    return ""
+                v = _xws.cell_value(r, c)
+                return "" if v is None else ("" if str(v).strip() in ("nan", "", "None") else str(v).strip())
 
-        def apply_fill(r, c, fill):
-            try:
-                ws.cell(row=r + 1, column=c + 1).fill = fill
-            except AttributeError:
-                pass
+            def _af(r, c, fill, _ws=ws):
+                try:
+                    _ws.cell(row=r + 1, column=c + 1).fill = fill
+                except AttributeError:
+                    pass
 
-    # ─── ブロック検出 ─────────────────────────────────────────
-    blocks = []
-    for r in range(n_rows):
-        temp = {}
-        for c in range(n_cols):
-            v = cell_val(r, c)
-            if re.match(r'^\d+日\([月火水木金土日]\)$', v):
-                temp[c] = v
-        if len(temp) >= 3:
-            blocks.append((r, temp))
-
-    # ─── 色付きセルの収集（材料欄のみ） ─────────────────────
-    ing_cells = {}
-
-    for block_idx, (block_date_row, block_date_cols) in enumerate(blocks):
-        block_end = (
-            blocks[block_idx + 1][0] if block_idx + 1 < len(blocks) else n_rows
-        )
-
-        block_mat_row = None
-        for r in range(block_date_row + 1, block_end):
-            for c in range(min(5, n_cols)):
-                if cell_val(r, c) == "材料":
-                    block_mat_row = r
-                    break
-            if block_mat_row is not None:
-                break
-
-        if block_mat_row is not None:
-            for col_c in sorted(block_date_cols.keys()):
-                for r in range(block_mat_row, block_end):
-                    v = cell_val(r, col_c)
-                    if not v:
-                        continue
-                    for kw_list, fill_color in ING_COLOR_RULES:
-                        if any(kw in v for kw in kw_list):
-                            ing_cells[(r, col_c)] = fill_color
-                            break
-
-    # ─── 色を適用 ────────────────────────────────────────────
-    for (r_idx, c_idx), fc in ing_cells.items():
-        apply_fill(r_idx, c_idx, fc)
+            _apply_colors(_cv, _af, n_rows, n_cols, fmt)
 
     bio = BytesIO()
     wb.save(bio)
@@ -1314,10 +1335,10 @@ if page == "📋 献立チェック":
             selected_sheet = st.selectbox("シート", sheets)
 
             st.markdown("### 3. 色付きExcel生成（目検用）")
-            if st.button("🎨 色付きExcel生成"):
+            if st.button("🎨 色付きExcel生成（全シート）"):
                 with st.spinner("色付き処理中..."):
                     uploaded.seek(0)
-                    colored = create_colored_excel(uploaded, selected_sheet)
+                    colored = create_colored_excel(uploaded)
                     st.session_state["colored_excel"] = colored.getvalue()
                     st.session_state["colored_fname"] = uploaded.name.rsplit(".", 1)[0]
 
@@ -1349,13 +1370,16 @@ if page == "📋 献立チェック":
                             )
                             st.session_state["last_result"] = result
                             st.session_state["last_filename"] = uploaded.name
+                            st.session_state["last_sheet"] = selected_sheet
                         except Exception as e:
                             st.error(f"エラーが発生しました: {e}")
                             result = None
 
             if st.session_state.get("last_result"):
                 st.markdown("---")
-                st.subheader("チェック結果")
+                _fname_disp = st.session_state.get("last_filename", "")
+                _sheet_disp = st.session_state.get("last_sheet", "")
+                st.subheader(f"チェック結果 ― {_fname_disp}　シート: {_sheet_disp}")
                 result_text = st.session_state["last_result"]
                 st.markdown(result_text)
                 fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
