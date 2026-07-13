@@ -13,7 +13,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill
+from openpyxl.styles import PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
 try:
@@ -897,6 +897,36 @@ def create_colored_excel(uploaded_file):
                         ws.row_dimensions[r_i + 1].height = ri.height / 20
             except Exception:
                 pass
+
+            # 罫線をコピー
+            _XLS_LINE = {
+                1: 'thin', 2: 'medium', 3: 'dashed', 4: 'dotted',
+                5: 'thick', 6: 'double', 7: 'hair', 8: 'mediumDashed',
+                9: 'dashDot', 10: 'mediumDashDot', 11: 'dashDotDot',
+                12: 'mediumDashDotDot', 13: 'slantDashDot',
+            }
+
+            def _side(line_type, colour_idx):
+                style = _XLS_LINE.get(line_type)
+                if not style:
+                    return Side(border_style=None)
+                rgb = xls_wb.colour_map.get(colour_idx)
+                color = f'{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}' if rgb else '000000'
+                return Side(border_style=style, color=color)
+
+            for r_i in range(n_rows):
+                for c_i in range(n_cols):
+                    try:
+                        xf = xls_wb.xf_list[xls_ws.cell_xf_index(r_i, c_i)]
+                        b = xf.border
+                        ws.cell(row=r_i + 1, column=c_i + 1).border = Border(
+                            left=_side(b.left_line_style, b.left_colour_index),
+                            right=_side(b.right_line_style, b.right_colour_index),
+                            top=_side(b.top_line_style, b.top_colour_index),
+                            bottom=_side(b.bottom_line_style, b.bottom_colour_index),
+                        )
+                    except Exception:
+                        pass
 
             # フォーマット検出
             df_sh = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
