@@ -842,12 +842,22 @@ def create_colored_excel(uploaded_file):
     # ─── .xls ────────────────────────────────────────────────
     else:
         import xlrd as _xlrd
-        xls_wb = _xlrd.open_workbook(file_contents=file_bytes)
+        # formatting_info=True で列幅・行高さを取得
+        xls_wb = _xlrd.open_workbook(file_contents=file_bytes, formatting_info=True)
         wb = Workbook()
         first = True
         for sh_name in xls_wb.sheet_names():
             xls_ws = xls_wb.sheet_by_name(sh_name)
-            n_rows, n_cols = xls_ws.nrows, xls_ws.ncols
+            n_cols = xls_ws.ncols
+
+            # データがある実際の最終行を特定（空行の大量コピーを防ぐ）
+            last_data_row = 0
+            for r_i in range(xls_ws.nrows):
+                if any(str(xls_ws.cell_value(r_i, c_i)).strip() not in ('', 'nan', 'None')
+                       for c_i in range(n_cols)):
+                    last_data_row = r_i
+            n_rows = last_data_row + 1
+
             if first:
                 ws = wb.active
                 ws.title = sh_name[:31]
@@ -862,15 +872,17 @@ def create_colored_excel(uploaded_file):
                     if v is not None and str(v).strip() not in ("nan", "", "None"):
                         ws.cell(row=r_i + 1, column=c_i + 1, value=str(v).strip() or None)
 
-            # マージセルをコピー
+            # マージセルをコピー（実データ範囲内のみ）
             for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
+                if row_lo >= n_rows:
+                    continue
                 try:
                     ws.merge_cells(start_row=row_lo + 1, start_column=col_lo + 1,
-                                   end_row=row_hi, end_column=col_hi)
+                                   end_row=min(row_hi, n_rows), end_column=col_hi)
                 except Exception:
                     pass
 
-            # 列幅・行高さ
+            # 列幅・行高さ（formatting_info=True で取得済み）
             try:
                 for c_i in range(n_cols):
                     ci = xls_ws.colinfo_map.get(c_i)
