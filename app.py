@@ -258,12 +258,14 @@ def push_rules_to_github(text):
 # ─────────────────────────────────────────────
 
 def _detect_sheet_format(df):
-    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'yumehana' / 'default'"""
+    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'default'"""
     all_text = ' '.join(str(v) for v in df.values.flatten() if pd.notna(v))
     if '熱と力になるもの' in all_text:
         return 'sakae'
     if '◎は10時おやつ' in all_text or ('材料名' in all_text and '献立名' in all_text):
         return 'omiya'
+    if 'うどんの日以外はおかゆ' in all_text:  # めばえの森（yumehanaより先に判定）
+        return 'mebaenomori'
     if '初期には入りません' in all_text or 'おかゆが付きます' in all_text:
         return 'yumehana'
     return 'default'
@@ -499,6 +501,86 @@ def _excel_to_text_yumehana(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_mebaenomori(df):
+    """めばえの森保育園形式（週別シート・datetime文字列日付・離乳食・2行/日）→ 構造化テキスト"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    def clean_mat(v):
+        return v.replace('＊', '').replace('*', '').strip()
+
+    _NOTE_PHRASES = ('初期には入りません', 'おかゆが付きます', '富喜屋', '株式会社')
+    _HOLIDAY_KW   = ('山の日', '海の日', '振替休日', '祝日', '休園', '夏期休暇',
+                     '冬期休暇', '春期休暇', 'こどもの日', '天皇誕生日')
+
+    year_num, month_num = 0, 0
+
+    days = {}     # label → {'lunch': [], 'mats': []}
+    day_order = []
+
+    for r in range(n_rows):
+        col0 = cv(r, 0)
+        col1 = cv(r, 1)
+        col2 = cv(r, 2)
+
+        # 日付行: pandasがdtype=strで読むと 'YYYY-MM-DD HH:MM:SS' 形式になる
+        dm = re.match(r'^(\d{4})-(\d{2})-(\d{2})', col0)
+        if dm:
+            y, mo, day = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
+            if not year_num:
+                year_num, month_num = y, mo
+            dow = col1 if re.match(r'^[月火水木金土日]$', col1) else '?'
+            label = f"{mo}/{day}({dow})"
+
+            if label not in days:
+                days[label] = {'lunch': [], 'mats': []}
+                day_order.append(label)
+
+            # 祝日・休園は料理名として追加しない
+            if col2 and not any(h in col2 for h in _HOLIDAY_KW):
+                days[label]['lunch'].append(col2)
+            for c in range(3, n_cols):
+                v = clean_mat(cv(r, c))
+                if v:
+                    days[label]['mats'].append(v)
+
+        # 2行目（col0・col1ともに空）: 同日の材料継続行または副料理行
+        elif col0 == '' and col1 == '' and day_order:
+            # 行全体のテキストに注記フレーズがあればスキップ
+            row_text = ' '.join(cv(r, c) for c in range(n_cols))
+            if any(p in row_text for p in _NOTE_PHRASES):
+                continue
+            mats_in_row = [clean_mat(cv(r, c)) for c in range(3, n_cols)
+                           if clean_mat(cv(r, c))]
+            if col2 or mats_in_row:
+                label = day_order[-1]
+                if col2:
+                    days[label]['lunch'].append(col2)
+                days[label]['mats'].extend(mats_in_row)
+
+    lines = []
+    if year_num and month_num:
+        lines += [f"# 献立データ {year_num}年{month_num:02d}月", ""]
+
+    for label in day_order:
+        d = days[label]
+        if not d['lunch'] and not d['mats']:
+            continue  # 祝日・空日はスキップ
+        lines.append(f"【{label}】")
+        if d['lunch']:
+            lines.append(f"昼食: {' / '.join(d['lunch'])}")
+        if d['mats']:
+            lines.append(f"材料: {', '.join(d['mats'])}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
 def get_sheet_names(uploaded_file):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
     try:
@@ -521,6 +603,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_sakae(df)
     if fmt == 'omiya':
         return _excel_to_text_omiya(df)
+    if fmt == 'mebaenomori':
+        return _excel_to_text_mebaenomori(df)
     if fmt == 'yumehana':
         return _excel_to_text_yumehana(df)
 
@@ -772,8 +856,8 @@ def create_colored_excel(uploaded_file):
                     if any(kw in v for kw in kw_list):
                         af_fn(r, 2, fc)
                         break
-        elif fmt == 'yumehana':
-            # 列3-9が材料
+        elif fmt in ('yumehana', 'mebaenomori'):
+            # 列3-9が材料（ゆめのはな・めばえの森共通）
             for r in range(n_rows):
                 for c in range(3, min(10, n_cols)):
                     v = cv_fn(r, c)
