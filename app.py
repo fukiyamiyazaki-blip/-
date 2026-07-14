@@ -102,11 +102,12 @@ def _split_ing(ing_text):
     """材料テキストを個別トークンに分割"""
     parts = re.split(r'[,、]', ing_text)
     result = []
+    _num = re.compile(r'^\d+\.?\d*$')  # 数値のみのトークン（数量・シリアル値）を除外
     for part in parts:
         # 半角・全角カッコも区切り文字として扱う
         for token in re.split(r'[\s　・／/()（）]+', part.strip()):
             t = token.strip()
-            if t and t not in ('nan', ''):
+            if t and t not in ('nan', '') and not _num.match(t):
                 result.append(t)
     return result
 
@@ -1058,10 +1059,11 @@ def compute_all_python_ngs(excel_text):
             day_ngs[sorted_dates[i]].append('● 芋類3日連続')
 
     # ── 汎用食材2日連続（免除リスト以外） ────────────────────
+    _NUM_ONLY = re.compile(r'^\d+\.?\d*$')  # 数値トークン（量・シリアル等）を除外
     for i in range(1, len(sorted_dates)):
         ds_c, ds_p = sorted_dates[i], sorted_dates[i-1]
-        toks_c = {t for t in _split_ing(ing(ds_c)) if not _is_exempt(t) and len(t) >= 2}
-        toks_p = {t for t in _split_ing(ing(ds_p)) if not _is_exempt(t) and len(t) >= 2}
+        toks_c = {t for t in _split_ing(ing(ds_c)) if not _is_exempt(t) and len(t) >= 2 and not _NUM_ONLY.match(t)}
+        toks_p = {t for t in _split_ing(ing(ds_p)) if not _is_exempt(t) and len(t) >= 2 and not _NUM_ONLY.match(t)}
         for token in sorted(toks_c & toks_p):
             day_ngs[ds_c].append(f'● {token}2日連続')
 
