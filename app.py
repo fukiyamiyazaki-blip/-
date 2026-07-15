@@ -31,12 +31,27 @@ st.set_page_config(
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
 RULES_JSON_FILE = BASE_DIR / "rules.json"
+COLOR_RULES_JSON_FILE = BASE_DIR / "color_rules.json"
+REPLACE_RULES_JSON_FILE = BASE_DIR / "replace_rules.json"
 
 GITHUB_OWNER = "fukiyamiyazaki-blip"
 GITHUB_REPO = "-"
 GITHUB_BRANCH = "main"
 GITHUB_RULES_PATH = "rules.txt"
 GITHUB_RULES_JSON_PATH = "rules.json"
+GITHUB_COLOR_RULES_JSON_PATH = "color_rules.json"
+GITHUB_REPLACE_RULES_JSON_PATH = "replace_rules.json"
+
+# 色付けルールが1件も登録されていない場合に使う初期セット（従来の固定配色と同一）
+DEFAULT_COLOR_GROUPS = [
+    {"keywords": ["コーン", "人参", "黄パプリカ", "赤パプリカ", "かぼちゃ"], "color": "FFFF99"},
+    {"keywords": ["ほうれん草", "小松菜", "チンゲン菜", "グリンピース",
+                  "いんげん", "えだまめ", "ブロッコリー", "ピーマン"],      "color": "CCFFCC"},
+    {"keywords": ["木綿豆腐", "焼き豆腐", "油揚げ", "厚揚げ", "大豆"],      "color": "FFD9AD"},
+    {"keywords": ["チーズ"],                                              "color": "E6CCFF"},
+    {"keywords": ["ちくわ", "かにかま", "ツナ", "赤かまぼこ"],             "color": "CCFFFF"},
+    {"keywords": ["ロースハム", "ベーコン", "ウインナー"],                 "color": "FFB3C6"},
+]
 
 # Streamlit の C キーショートカット（キャッシュクリア）を無効化
 components.html("""
@@ -117,6 +132,180 @@ def save_rules_list(rules_list):
         pass  # Streamlit Cloud では書き込み不可の場合もあるが GitHub が主ストレージ
 
 
+def load_color_rules_list():
+    """色付けルール（複数セット）をリストで返す。GitHubを優先し、失敗時のみローカルにフォールバック。
+    1件も登録がない場合は従来の固定配色をデフォルトルールとして返す（未保存・表示専用）。
+    各要素: {"id": str, "name": str, "groups": [{"keywords": [str,...], "color": "RRGGBB"}, ...]}
+    """
+    token = get_github_token()
+    if token:
+        api_url = (
+            f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+            f"/contents/{GITHUB_COLOR_RULES_JSON_PATH}?ref={GITHUB_BRANCH}"
+        )
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        req = urllib.request.Request(api_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+                content = base64.b64decode(data["content"]).decode("utf-8")
+                rules = json.loads(content).get("color_rules", [])
+                if rules:
+                    return rules
+        except Exception:
+            pass  # GitHub取得失敗 → ローカルにフォールバック
+
+    if COLOR_RULES_JSON_FILE.exists():
+        try:
+            data = json.loads(COLOR_RULES_JSON_FILE.read_text(encoding="utf-8"))
+            rules = data.get("color_rules", [])
+            if rules:
+                return rules
+        except Exception:
+            pass
+
+    return [{"id": "default", "name": "デフォルト（従来の配色）", "groups": DEFAULT_COLOR_GROUPS}]
+
+
+def save_color_rules_list(color_rules_list):
+    """色付けルールをJSON保存（ローカル）。失敗してもエラーを出さない。"""
+    try:
+        COLOR_RULES_JSON_FILE.write_text(
+            json.dumps({"color_rules": color_rules_list}, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def push_color_rules_list_to_github(color_rules_list):
+    """色付けルール（color_rules.json）をGitHubに保存。"""
+    token = get_github_token()
+    if not token:
+        return False, "GitHubトークンが未設定です"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{GITHUB_COLOR_RULES_JSON_PATH}"
+    )
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    }
+
+    sha = None
+    req = urllib.request.Request(
+        api_url + f"?ref={GITHUB_BRANCH}", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sha = json.loads(resp.read())["sha"]
+    except Exception:
+        pass  # 新規ファイルの場合はSHAなし
+
+    content_text = json.dumps({"color_rules": color_rules_list}, ensure_ascii=False, indent=2)
+    body = {"message": "色付けルール管理から更新", "branch": GITHUB_BRANCH,
+            "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8")}
+    if sha:
+        body["sha"] = sha
+
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(api_url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req):
+            return True, "保存しました（GitHub反映済み）"
+    except Exception as e:
+        return False, f"GitHub更新エラー: {e}"
+
+
+def load_replace_rules_list():
+    """置換ルール（複数セット）をリストで返す。GitHubを優先し、失敗時のみローカルにフォールバック。
+    各要素: {"id": str, "name": str, "pairs": [{"from": str, "to": str}, ...]}
+    """
+    token = get_github_token()
+    if token:
+        api_url = (
+            f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+            f"/contents/{GITHUB_REPLACE_RULES_JSON_PATH}?ref={GITHUB_BRANCH}"
+        )
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        req = urllib.request.Request(api_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+                content = base64.b64decode(data["content"]).decode("utf-8")
+                return json.loads(content).get("replace_rules", [])
+        except Exception:
+            pass  # GitHub取得失敗 → ローカルにフォールバック
+
+    if REPLACE_RULES_JSON_FILE.exists():
+        try:
+            data = json.loads(REPLACE_RULES_JSON_FILE.read_text(encoding="utf-8"))
+            return data.get("replace_rules", [])
+        except Exception:
+            pass
+    return []
+
+
+def save_replace_rules_list(replace_rules_list):
+    """置換ルールをJSON保存（ローカル）。失敗してもエラーを出さない。"""
+    try:
+        REPLACE_RULES_JSON_FILE.write_text(
+            json.dumps({"replace_rules": replace_rules_list}, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def push_replace_rules_list_to_github(replace_rules_list):
+    """置換ルール（replace_rules.json）をGitHubに保存。"""
+    token = get_github_token()
+    if not token:
+        return False, "GitHubトークンが未設定です"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{GITHUB_REPLACE_RULES_JSON_PATH}"
+    )
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    }
+
+    sha = None
+    req = urllib.request.Request(
+        api_url + f"?ref={GITHUB_BRANCH}", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sha = json.loads(resp.read())["sha"]
+    except Exception:
+        pass  # 新規ファイルの場合はSHAなし
+
+    content_text = json.dumps({"replace_rules": replace_rules_list}, ensure_ascii=False, indent=2)
+    body = {"message": "置換ルール管理から更新", "branch": GITHUB_BRANCH,
+            "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8")}
+    if sha:
+        body["sha"] = sha
+
+    payload = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(api_url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req):
+            return True, "保存しました（GitHub反映済み）"
+    except Exception as e:
+        return False, f"GitHub更新エラー: {e}"
+
+
 # ─────────────────────────────────────────────
 # Python事前計算用ヘルパー
 # ─────────────────────────────────────────────
@@ -164,7 +353,10 @@ def _parse_structured(excel_text):
     """
     excel_text を日付ごとの構造体に変換。
     Returns: (year, month_num, sorted_dates, entries)
-      entries[date_str] = {'lunch': str, 'snack': str, 'ingredients': str}
+      entries[date_str] = {'lunch': str, 'snack': str, 'ingredients': str,
+                            'snack_am': str, 'snack_pm': str}
+      snack_am/snack_pm は「午前おやつ:」「午後おやつ:」が出力される形式（くにみ子ども園等）
+      でのみ入る。他形式では空文字のまま（既存チェックへの影響なし）。
     """
     year, month_num = 0, 0
     ym = re.search(r'(\d{4})年(\d+)月', excel_text)
@@ -176,10 +368,15 @@ def _parse_structured(excel_text):
         dm = re.match(r'【(\d+/\d+\([月火水木金土日]\))】', line)
         if dm:
             current = dm.group(1)
-            entries[current] = {'lunch': '', 'snack': '', 'ingredients': ''}
+            entries[current] = {'lunch': '', 'snack': '', 'ingredients': '',
+                                 'snack_am': '', 'snack_pm': ''}
         elif current:
             if line.startswith('昼食:'):
                 entries[current]['lunch'] = line[3:].strip()
+            elif line.startswith('午前おやつ:'):
+                entries[current]['snack_am'] = line[6:].strip()
+            elif line.startswith('午後おやつ:'):
+                entries[current]['snack_pm'] = line[6:].strip()
             elif line.startswith('おやつ:'):
                 entries[current]['snack'] = line[4:].strip()
             elif line.startswith('材料:'):
@@ -348,7 +545,7 @@ def push_rules_list_to_github(rules_list):
 # ─────────────────────────────────────────────
 
 def _detect_sheet_format(df):
-    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'yamazaki' / 'default'"""
+    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'yamazaki' / 'kunimi' / 'default'"""
     all_text = ' '.join(str(v) for v in df.values.flatten() if pd.notna(v))
     if '熱と力になるもの' in all_text:
         return 'sakae'
@@ -362,6 +559,8 @@ def _detect_sheet_format(df):
         return 'yumehana'
     if '初期・アレルギーには' in all_text:  # 歩学園バンビ形式（離乳食・datetime日付・おやつcol8-9）
         return 'ayumi'
+    if 'くにみ子ども園' in all_text:  # くにみ子ども園形式（横並び・4列/日・午前/昼食/午後・乳児幼児2分量）
+        return 'kunimi'
     # 山崎幼稚園形式（横並び・3列/日）：セル単体が「材料表」と完全一致する場合のみ判定。
     # 部分一致にすると「献立材料表」のようなタイトル文言を含む他園（例：東久留米おひさま）を
     # 誤って山崎形式と判定してしまう（列オフセットが異なるため誤爆する）。
@@ -988,6 +1187,115 @@ def _excel_to_text_miyama(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_kunimi(df):
+    """
+    くにみ子ども園形式（横並び・4列/日・午前/昼食/午後の3食区分・乳児幼児2分量）
+    → 構造化テキスト。
+    列構成（date_col=日付「N日」があるセル）：
+      献立名（料理名）: date_col - 1
+      材料名          : date_col
+      乳児用グラム    : date_col + 1
+      幼児用グラム    : date_col + 2
+    「午前」「昼食」「午後」の各ラベル行（col1）の直後に「乳児/幼児」ヘッダー行が
+    現れ、そこから次のラベル行までが材料表（1行1食材）になっている。
+    """
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    # タイトルの年月表記がシート右側の遠い列にあるため、全列を対象に広く探索する
+    year_month, month_num = "", 0
+    for r in range(min(5, n_rows)):
+        for c in range(n_cols):
+            m = re.match(r'(\d{4})年(\d{1,2})月', cv(r, c))
+            if m:
+                month_num = int(m.group(2))
+                year_month = f"{m.group(1)}年{month_num:02d}月"
+                break
+        if year_month:
+            break
+
+    # 日付行検出：「N日」パターンが3個以上ある行
+    date_row, date_cols = None, {}
+    for r in range(n_rows):
+        temp = {c: cv(r, c) for c in range(n_cols) if re.match(r'^\d+日$', cv(r, c))}
+        if len(temp) >= 3:
+            date_row, date_cols = r, temp
+            break
+    if date_row is None:
+        return ""
+
+    def date_label(col_c):
+        dm = re.match(r'(\d+)日', date_cols[col_c])
+        dow = cv(date_row, col_c + 1).strip('()（）')
+        if dm and month_num:
+            return f"{month_num}/{dm.group(1)}({dow})" if dow else f"{month_num}/{dm.group(1)}"
+        return date_cols[col_c]
+
+    # 食事区分（午前・昼食・午後）ラベル行と、直後の乳児/幼児材料ヘッダー行を検出
+    MEAL_LABELS = ('午前', '昼食', '午後')
+    header_rows = [r for r in range(date_row + 1, n_rows)
+                   if cv(r, 4) == '乳児' and cv(r, 5) == '幼児']
+    # col1にラベルがある行（食事区分ラベルだけでなく、末尾の栄養価サマリー行
+    # 「脂肪」「カルシウム」等も含む）を材料表の終端検出に使う
+    labeled_rows = sorted(r for r in range(date_row + 1, n_rows) if cv(r, 1))
+
+    meal_blocks = []  # [(label, dish_start_row, mat_header_row), ...]
+    for r in range(date_row + 1, n_rows):
+        label = cv(r, 1)
+        if label in MEAL_LABELS:
+            nxt_header = next((h for h in header_rows if h > r), None)
+            if nxt_header is not None:
+                meal_blocks.append((label, r, nxt_header))
+
+    lines = []
+    if year_month:
+        lines += [f"# 献立データ {year_month}", ""]
+
+    for col_c in sorted(date_cols.keys()):
+        lines.append(f"【{date_label(col_c)}】")
+        lunch_dishes, snack_am, snack_pm = [], [], []
+        all_mats = []
+
+        for idx, (label, dish_row, mat_row) in enumerate(meal_blocks):
+            block_end = next((lr for lr in labeled_rows if lr > mat_row), n_rows)
+
+            if label == '昼食':
+                for r in range(dish_row, mat_row):
+                    v = cv(r, col_c - 1)
+                    if v:
+                        lunch_dishes.append(v)
+
+            mats = []
+            for r in range(mat_row + 1, block_end):
+                v = cv(r, col_c)
+                if v:
+                    mats.append(v)
+            all_mats.extend(mats)
+            if label == '午前':
+                snack_am.extend(mats)
+            elif label == '午後':
+                snack_pm.extend(mats)
+
+        if lunch_dishes:
+            lines.append(f"昼食: {' / '.join(lunch_dishes)}")
+        if snack_am or snack_pm:
+            lines.append(f"おやつ: {' / '.join(snack_am + snack_pm)}")
+            if snack_am:
+                lines.append(f"午前おやつ: {' / '.join(snack_am)}")
+            if snack_pm:
+                lines.append(f"午後おやつ: {' / '.join(snack_pm)}")
+        if all_mats:
+            lines.append(f"材料: {', '.join(all_mats)}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
 def get_sheet_names(uploaded_file):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
     try:
@@ -1020,6 +1328,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_ayumi(df)
     if fmt == 'miyama':
         return _excel_to_text_miyama(df)
+    if fmt == 'kunimi':
+        return _excel_to_text_kunimi(df)
 
     n_rows, n_cols = df.shape
 
@@ -1222,11 +1532,13 @@ def table_to_docx(markdown_text):
     return bio
 
 
-def create_colored_excel(uploaded_file):
+def create_colored_excel(uploaded_file, color_groups=None):
     """
     全シートを色付きにして .xlsx で返す。フォーマット自動検出により
     さかえ・おおみや・ゆめのはな・既存形式それぞれの材料列に色付け。
     .xls はデータ・マージセルを再構築（書式は一部失われる）。
+    color_groups: [{"keywords": [str,...], "color": "RRGGBB"}, ...]
+                  省略時は DEFAULT_COLOR_GROUPS（従来の固定配色）を使用。
     """
     is_xls = uploaded_file.name.lower().endswith(".xls")
     file_bytes = uploaded_file.read()
@@ -1236,13 +1548,8 @@ def create_colored_excel(uploaded_file):
         return PatternFill(fill_type='solid', fgColor=hex6)
 
     ING_COLOR_RULES = [
-        (['コーン', '人参', '黄パプリカ', '赤パプリカ', 'かぼちゃ'], _fill('FFFF99')),
-        (['ほうれん草', '小松菜', 'チンゲン菜', 'グリンピース',
-          'いんげん', 'えだまめ', 'ブロッコリー', 'ピーマン'],      _fill('CCFFCC')),
-        (['木綿豆腐', '焼き豆腐', '油揚げ', '厚揚げ', '大豆'],      _fill('FFD9AD')),
-        (['チーズ'],                                                  _fill('E6CCFF')),
-        (['ちくわ', 'かにかま', 'ツナ', '赤かまぼこ'],               _fill('CCFFFF')),
-        (['ロースハム', 'ベーコン', 'ウインナー'],                    _fill('FFB3C6')),
+        (g["keywords"], _fill(g["color"]))
+        for g in (color_groups or DEFAULT_COLOR_GROUPS)
     ]
 
     # ─── フォーマット別の色付けロジック ──────────────────────
@@ -1479,6 +1786,129 @@ def create_colored_excel(uploaded_file):
     return bio
 
 
+def apply_replacements_to_excel(uploaded_file, pairs):
+    """
+    アップロードされたExcelの全セルに対し、pairs の (from → to) を順に文字列置換して
+    新しい .xlsx を返す。列オフセット等を考慮しないフォーマット非依存の一律置換。
+    .xls はデータ・マージセル・列幅行高さ・罫線を再構築する（create_colored_excelと同様）。
+    pairs: [{"from": str, "to": str}, ...]
+    """
+    is_xls = uploaded_file.name.lower().endswith(".xls")
+    file_bytes = uploaded_file.read()
+
+    def _replace(v):
+        s = str(v)
+        for p in pairs:
+            if p.get("from"):
+                s = s.replace(p["from"], p.get("to", ""))
+        return s
+
+    # ─── .xlsx ───────────────────────────────────────────────
+    if not is_xls:
+        wb = load_workbook(BytesIO(file_bytes))
+        for sh_name in wb.sheetnames:
+            ws = wb[sh_name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    if isinstance(cell.value, str):
+                        cell.value = _replace(cell.value)
+        bio = BytesIO()
+        wb.save(bio)
+        bio.seek(0)
+        return bio
+
+    # ─── .xls ────────────────────────────────────────────────
+    import xlrd as _xlrd
+    xls_wb = _xlrd.open_workbook(file_contents=file_bytes, formatting_info=True)
+    wb = Workbook()
+    first = True
+    for sh_name in xls_wb.sheet_names():
+        xls_ws = xls_wb.sheet_by_name(sh_name)
+        n_cols = xls_ws.ncols
+
+        last_data_row = 0
+        for r_i in range(xls_ws.nrows):
+            if any(str(xls_ws.cell_value(r_i, c_i)).strip() not in ('', 'nan', 'None')
+                   for c_i in range(n_cols)):
+                last_data_row = r_i
+        n_rows = last_data_row + 1
+
+        if first:
+            ws = wb.active
+            ws.title = sh_name[:31]
+            first = False
+        else:
+            ws = wb.create_sheet(title=sh_name[:31])
+
+        # 値をコピー（置換を適用しながら）
+        for r_i in range(n_rows):
+            for c_i in range(n_cols):
+                v = xls_ws.cell_value(r_i, c_i)
+                if v is not None and str(v).strip() not in ("nan", "", "None"):
+                    ws.cell(row=r_i + 1, column=c_i + 1, value=_replace(str(v).strip()) or None)
+
+        # マージセルをコピー
+        for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
+            if row_lo >= n_rows:
+                continue
+            try:
+                ws.merge_cells(start_row=row_lo + 1, start_column=col_lo + 1,
+                               end_row=min(row_hi, n_rows), end_column=col_hi)
+            except Exception:
+                pass
+
+        # 列幅・行高さ
+        try:
+            for c_i in range(n_cols):
+                ci = xls_ws.colinfo_map.get(c_i)
+                if ci and ci.width > 0:
+                    ws.column_dimensions[get_column_letter(c_i + 1)].width = ci.width / 256
+        except Exception:
+            pass
+        try:
+            for r_i in range(n_rows):
+                ri = xls_ws.rowinfo_map.get(r_i)
+                if ri and ri.height > 0:
+                    ws.row_dimensions[r_i + 1].height = ri.height / 20
+        except Exception:
+            pass
+
+        # 罫線をコピー
+        _XLS_LINE = {
+            1: 'thin', 2: 'medium', 3: 'dashed', 4: 'dotted',
+            5: 'thick', 6: 'double', 7: 'hair', 8: 'mediumDashed',
+            9: 'dashDot', 10: 'mediumDashDot', 11: 'dashDotDot',
+            12: 'mediumDashDotDot', 13: 'slantDashDot',
+        }
+
+        def _side(line_type, colour_idx):
+            style = _XLS_LINE.get(line_type)
+            if not style:
+                return Side(border_style=None)
+            rgb = xls_wb.colour_map.get(colour_idx)
+            color = f'{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}' if rgb else '000000'
+            return Side(border_style=style, color=color)
+
+        for r_i in range(n_rows):
+            for c_i in range(n_cols):
+                try:
+                    xf = xls_wb.xf_list[xls_ws.cell_xf_index(r_i, c_i)]
+                    b = xf.border
+                    ws.cell(row=r_i + 1, column=c_i + 1).border = Border(
+                        left=_side(b.left_line_style, b.left_colour_index),
+                        right=_side(b.right_line_style, b.right_colour_index),
+                        top=_side(b.top_line_style, b.top_colour_index),
+                        bottom=_side(b.bottom_line_style, b.bottom_colour_index),
+                    )
+                except Exception:
+                    pass
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def clean_result_column(text):
     """AI出力の結果列を後処理：OK説明文を強制除去してOK/●NGのみにする"""
     # これらのいずれかを含む●セルは「実NGなし」とみなしてOKに変換
@@ -1519,11 +1949,13 @@ def clean_result_column(text):
     return result
 
 
-def compute_all_python_ngs(excel_text, rules_text=""):
+def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     """
     全ルールベースNGをPythonで計算。
     選択中ルール本文（rules_text）にステップ見出しが含まれるかで各チェックのON/OFFを判定する
     （ルールごとにチェック内容が異なるため、ハードコード項目を無条件に全ルールへ適用しない）。
+    leftover_words: 置換ルールの「置換前」の単語リスト。指定時、置換されずに残っている単語を検出する
+                    （事前に置換ルールを適用したはずのファイルで、置換漏れがないかの確認用）。
     Returns: (summary_text, day_ngs_dict)
       summary_text  … AIプロンプトに埋め込むNG一覧テキスト
       day_ngs_dict  … {date_str: [ng_str, ...]}
@@ -1554,6 +1986,7 @@ def compute_all_python_ngs(excel_text, rules_text=""):
     check_saturday_noodle     = rule_has('土曜日」に麺', '土曜日に麺')
     check_jelly_prev          = rule_has('を含む文言がある日の前日')
     check_seasonal_stew       = rule_has('クリームシチュー')
+    check_kunimi              = rule_has('くにみ子ども園固有ルール')
 
     def ing(ds):
         return entries[ds]['ingredients']
@@ -1564,8 +1997,22 @@ def compute_all_python_ngs(excel_text, rules_text=""):
     def snack(ds):
         return entries[ds]['snack']
 
+    def snack_am(ds):
+        return entries[ds].get('snack_am', '')
+
+    def snack_pm(ds):
+        return entries[ds].get('snack_pm', '')
+
     def has(text, kw_list):
         return any(kw in text for kw in kw_list)
+
+    # ── 置換漏れ検出（事前に置換ルールを適用したはずの単語が残っていないか） ──
+    if leftover_words:
+        for ds in sorted_dates:
+            whole_text = ing(ds) + ' ' + lunch(ds) + ' ' + snack(ds)
+            for w in leftover_words:
+                if w and w in whole_text:
+                    day_ngs[ds].append(f'● 置換漏れ：「{w}」が残っています（置換ルールの適用を確認してください）')
 
     # ── 禁止食材 ────────────────────────────────────────────────
     if check_forbidden:
@@ -1851,6 +2298,109 @@ def compute_all_python_ngs(excel_text, rules_text=""):
                     if f not in dish_fish:
                         day_ngs[ds].append(f'● 材料に「{f}」があるが献立名に対応する料理なし（不要食材？）')
 
+    # ── くにみ子ども園固有ルール ────────────────────────────────
+    if check_kunimi:
+        _dow_map_k = {'月': 0, '火': 1, '水': 2, '木': 3, '金': 4, '土': 5, '日': 6}
+
+        def _week_key_k(ds):
+            m2 = re.search(r'/(\d+)\(([月火水木金土日])\)', ds)
+            return int(m2.group(1)) - _dow_map_k.get(m2.group(2), 0) if m2 else -1
+
+        weeks_k = {}
+        for ds in sorted_dates:
+            weeks_k.setdefault(_week_key_k(ds), []).append(ds)
+
+        # 朝おやつ：みかん缶・バナナが週1回（1〜3月はお菓子のみで果物なし）
+        FRUIT_ROTATION = ['みかん缶', 'バナナ']
+        if 1 <= month_num <= 3:
+            for ds in sorted_dates:
+                if any(f in snack_am(ds) for f in FRUIT_ROTATION):
+                    day_ngs[ds].append('● 1〜3月の朝おやつは「お菓子」のみのはずが果物（みかん缶/バナナ）あり')
+        else:
+            for _, wds in sorted(weeks_k.items()):
+                wd_k = sorted(wds, key=lambda d: _parse_date(d, year) or datetime.date.max)
+                last_k = wd_k[-1]
+                cnt = sum(1 for ds in wd_k for f in FRUIT_ROTATION if f in snack_am(ds))
+                if cnt == 0:
+                    day_ngs[last_k].append('● 今週、朝おやつに「みかん缶」「バナナ」のどちらもなし（週1回必要）')
+                elif cnt >= 2:
+                    day_ngs[last_k].append('● 今週、朝おやつに「みかん缶」「バナナ」が2回以上（週1回のみ）')
+
+        # 毎月1回は入れる（麩ラスク＝麩、3時のおやつの果物、ヨーグルト和え、納豆、メロン）
+        # ※麩ラスク等の完成品名は生データに出てこないため、代表食材での存在チェックで代用
+        if sorted_dates:
+            last_day = sorted_dates[-1]
+            MONTHLY_REQUIRED = [
+                ('麩ラスク（材料「麩」で代替判定）', lambda ds: snack_pm(ds), ['麩']),
+                ('3時のおやつの果物',                 lambda ds: snack_pm(ds), FRUIT_KW),
+                ('ヨーグルト和え（昼食に「ヨーグルト」）', lambda ds: lunch(ds), ['ヨーグルト']),
+                ('納豆',                               lambda ds: ing(ds),     ['納豆']),
+                ('メロン',                             lambda ds: ing(ds),     ['メロン']),
+            ]
+            for label, getter, kws in MONTHLY_REQUIRED:
+                if not any(has(getter(ds), kws) for ds in sorted_dates):
+                    day_ngs[last_day].append(f'● 今月「{label}」が一度も入っていません（毎月必須）')
+
+            has_champon  = any('ちゃんぽん' in lunch(ds) for ds in sorted_dates)
+            has_saraudon = any('皿うどん' in lunch(ds) for ds in sorted_dates)
+            if not has_champon:
+                day_ngs[last_day].append('● 今月「ちゃんぽん」が一度も入っていません')
+            if not has_saraudon:
+                day_ngs[last_day].append('● 今月「皿うどん」が一度も入っていません')
+
+        # ビーフン・ブリは使用しない
+        for ds in sorted_dates:
+            whole = lunch(ds) + ' ' + snack(ds) + ' ' + ing(ds)
+            if 'ビーフン' in whole:
+                day_ngs[ds].append('● 「ビーフン」使用（くにみ子ども園では不使用）')
+            if 'ブリ' in whole:
+                day_ngs[ds].append('● 「ブリ」使用（くにみ子ども園では不使用）')
+
+        # パン曜日ルール：火曜日はロールパン、第2・4金曜日はベーグル（パンが出る日のみ判定）
+        _BREAD_KW = ['ロールパン', 'ベーグル', '食パン']
+        for ds in sorted_dates:
+            d = _parse_date(ds, year)
+            if not d:
+                continue
+            l_text = lunch(ds)
+            if not has(l_text, _BREAD_KW):
+                continue
+            dow_i = _dow(ds)
+            if dow_i == 1 and 'ロールパン' not in l_text:
+                day_ngs[ds].append('● 火曜日のパンは「ロールパン」のはずが違う種類')
+            week_of_month = (d.day - 1) // 7 + 1
+            if dow_i == 4 and week_of_month in (2, 4) and 'ベーグル' not in l_text:
+                day_ngs[ds].append('● 第2・4金曜日のパンは「ベーグル」のはずが違う種類')
+
+        # 魚とパンの組み合わせNG
+        _fish_all_k = FISH_KW  # 白身魚も含めて判定
+        for ds in sorted_dates:
+            l_text = lunch(ds)
+            if has(l_text, _BREAD_KW) and has(l_text, _fish_all_k):
+                day_ngs[ds].append('● 「パン」と「魚」の組み合わせ（併用不可）')
+
+        # ちゃんぽん・皿うどんの日：キャベツ/白菜NG、丸天+のべ板必須
+        for ds in sorted_dates:
+            l_text = lunch(ds)
+            if 'ちゃんぽん' in l_text or '皿うどん' in l_text:
+                i_text = ing(ds)
+                if 'キャベツ' in i_text:
+                    day_ngs[ds].append('● ちゃんぽん/皿うどんの日に「キャベツ」使用（不使用のはず）')
+                if '白菜' in i_text:
+                    day_ngs[ds].append('● ちゃんぽん/皿うどんの日に「白菜」使用（不使用のはず）')
+                if '丸天' not in i_text:
+                    day_ngs[ds].append('● ちゃんぽん/皿うどんの日に「丸天」なし（必須）')
+                if 'のべ板' not in i_text:
+                    day_ngs[ds].append('● ちゃんぽん/皿うどんの日に「のべ板」なし（必須）')
+
+        # 麺の日に「ソテー」「お浸し」系の副菜が2種類（1種類にする）
+        for ds in sorted_dates:
+            l_text = lunch(ds)
+            if has(l_text, NOODLE_KW):
+                style_cnt = l_text.count('ソテー') + l_text.count('お浸し')
+                if style_cnt >= 2:
+                    day_ngs[ds].append('● 麺の日に「ソテー」「お浸し」系の副菜が2種類（1種類にする）')
+
     # ── 出力テキスト生成 ──────────────────────────────────────
     lines = [
         '【Python確定NGリスト】',
@@ -1868,9 +2418,9 @@ def compute_all_python_ngs(excel_text, rules_text=""):
     return '\n'.join(lines), day_ngs
 
 
-def run_check(excel_text, rules_text, api_key, file_name, sheet_name):
+def run_check(excel_text, rules_text, api_key, file_name, sheet_name, leftover_words=None):
     client = anthropic.Anthropic(api_key=api_key)
-    python_ng_text, _ = compute_all_python_ngs(excel_text, rules_text)
+    python_ng_text, _ = compute_all_python_ngs(excel_text, rules_text, leftover_words)
 
     prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
 担当は「ステップ４：献立名と材料の照合チェック」のみです。
@@ -1946,7 +2496,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "ページを選択",
-        ["📋 献立チェック", "⚙️ ルール管理"],
+        ["📋 献立チェック", "⚙️ ルール管理", "🎨 色付けルール管理", "🔄 置換ルール管理"],
         label_visibility="collapsed",
     )
 
@@ -1957,6 +2507,44 @@ if page == "📋 献立チェック":
     api_key = get_api_key()
     if not api_key:
         st.error("⚠️ APIキーが設定されていません。管理者にお問い合わせください。")
+
+    with st.expander("🔄 0. 置換Excel生成（任意・材料名の言い換え）", expanded=False):
+        st.caption(
+            "「かまぼこ→のべ板」のような園独自の言い換えを先に適用したExcelを作成します。"
+            "生成後にダウンロードし、その置換済みファイルを下の「1. ファイルをアップロード」で"
+            "アップロードしてチェックしてください。"
+        )
+        all_replace_rules = load_replace_rules_list()
+        if not all_replace_rules:
+            st.info("置換ルールが登録されていません。「置換ルール管理」ページで追加してください。")
+        else:
+            replace_rule_names = [r["name"] for r in all_replace_rules]
+            chosen_replace_name = st.selectbox(
+                "置換ルール", replace_rule_names, key="replace_rule_selector_gen",
+            )
+            replace_upload = st.file_uploader(
+                "置換対象のExcelファイル（.xls または .xlsx）",
+                type=["xls", "xlsx"], key="replace_uploader",
+            )
+            if replace_upload and st.button("🔄 置換Excel生成"):
+                selected_pairs = next(
+                    (r["pairs"] for r in all_replace_rules if r["name"] == chosen_replace_name), []
+                )
+                with st.spinner("置換処理中..."):
+                    replace_upload.seek(0)
+                    replaced = apply_replacements_to_excel(replace_upload, selected_pairs)
+                    st.session_state["replaced_excel"] = replaced.getvalue()
+                    st.session_state["replaced_fname"] = replace_upload.name.rsplit(".", 1)[0]
+
+            if st.session_state.get("replaced_excel"):
+                fname_r = st.session_state.get("replaced_fname", "result")
+                st.download_button(
+                    "📥 置換済みExcelをダウンロード",
+                    data=st.session_state["replaced_excel"],
+                    file_name=f"置換済み_{fname_r}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="dl_replaced",
+                )
 
     st.markdown("### 1. ファイルをアップロード")
     uploaded = st.file_uploader(
@@ -1987,11 +2575,38 @@ if page == "📋 献立チェック":
                     (r["text"] for r in all_rules if r["name"] == chosen_name), ""
                 )
 
+            all_replace_rules_check = load_replace_rules_list()
+            leftover_words = []
+            if all_replace_rules_check:
+                replace_check_names = ["（使用しない）"] + [r["name"] for r in all_replace_rules_check]
+                chosen_replace_check_name = st.selectbox(
+                    "置換ルール（置換漏れチェック用・任意）",
+                    replace_check_names,
+                    key="replace_rule_selector_check",
+                    help="事前に置換Excel生成で使ったルールを選ぶと、置換前の単語が残っていないかもチェックします。",
+                )
+                if chosen_replace_check_name != "（使用しない）":
+                    pairs = next(
+                        (r["pairs"] for r in all_replace_rules_check
+                         if r["name"] == chosen_replace_check_name), []
+                    )
+                    leftover_words = [p["from"] for p in pairs if p.get("from")]
+
             st.markdown("### 4. 色付きExcel生成（目検用）")
+            all_color_rules = load_color_rules_list()
+            color_rule_names = [r["name"] for r in all_color_rules]
+            chosen_color_name = st.selectbox(
+                "色付けルール", color_rule_names,
+                key="color_rule_selector",
+            )
+            selected_color_groups = next(
+                (r["groups"] for r in all_color_rules if r["name"] == chosen_color_name),
+                DEFAULT_COLOR_GROUPS,
+            )
             if st.button("🎨 色付きExcel生成（全シート）"):
                 with st.spinner("色付き処理中..."):
                     uploaded.seek(0)
-                    colored = create_colored_excel(uploaded)
+                    colored = create_colored_excel(uploaded, selected_color_groups)
                     st.session_state["colored_excel"] = colored.getvalue()
                     st.session_state["colored_fname"] = uploaded.name.rsplit(".", 1)[0]
 
@@ -2019,7 +2634,8 @@ if page == "📋 献立チェック":
                         try:
                             uploaded.seek(0)
                             result = run_check(
-                                excel_text, rules, api_key, uploaded.name, selected_sheet
+                                excel_text, rules, api_key, uploaded.name, selected_sheet,
+                                leftover_words,
                             )
                             st.session_state["last_result"] = result
                             st.session_state["last_filename"] = uploaded.name
@@ -2145,5 +2761,285 @@ elif page == "⚙️ ルール管理":
                                 st.rerun()
                         else:
                             if st.button("🗑 削除", key=f"del_{rule['id']}"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+
+
+elif page == "🎨 色付けルール管理":
+    st.title("🎨 色付けルール管理")
+    st.caption(
+        "「どのキーワードにどの色を付けるか」をグループ単位で登録できます。"
+        "チェック画面の「色付きExcel生成」でルールを選んで使えます。保存はGitHubにも自動反映されます。"
+    )
+
+    all_color_rules = load_color_rules_list()
+    editing = st.session_state.get("color_rule_editing")
+    # editing = {"id": str|None, "name": str, "groups": [{"keywords": [str,...], "color": "RRGGBB"}, ...]}
+
+    if editing is not None:
+        is_new = editing["id"] is None
+        st.subheader("➕ 新しい色付けルールを追加" if is_new else f"✏️ 編集：{editing['name']}")
+
+        new_name = st.text_input(
+            "ルール名（例：さかえ保育園向け配色 など）",
+            value=editing["name"],
+            max_chars=50,
+            key="color_rule_name_input",
+        )
+
+        st.markdown("**色グループ**（同じ色を付けたいキーワードをカンマ区切りでまとめて入力）")
+        groups = editing["groups"]
+        ver = st.session_state.setdefault("color_rule_edit_version", 0)
+
+        for i, g in enumerate(groups):
+            col_kw, col_color, col_del = st.columns([5, 1, 1])
+            with col_kw:
+                kw_text = ", ".join(g["keywords"])
+                new_kw = st.text_input(
+                    f"キーワード群 {i + 1}", value=kw_text,
+                    key=f"color_group_kw_{ver}_{i}", label_visibility="collapsed",
+                    placeholder="例：コーン, 人参, かぼちゃ",
+                )
+                g["keywords"] = [k.strip() for k in new_kw.split(",") if k.strip()]
+            with col_color:
+                new_color = st.color_picker(
+                    f"色 {i + 1}", value=f"#{g['color']}",
+                    key=f"color_group_color_{ver}_{i}", label_visibility="collapsed",
+                )
+                g["color"] = new_color.lstrip("#").upper()
+            with col_del:
+                if st.button("🗑", key=f"color_group_del_{ver}_{i}"):
+                    groups.pop(i)
+                    st.session_state["color_rule_edit_version"] = ver + 1
+                    st.rerun()
+
+        if st.button("＋ グループを追加", key="color_group_add"):
+            groups.append({"keywords": [], "color": "FFFFFF"})
+            st.session_state["color_rule_edit_version"] = ver + 1
+            st.rerun()
+
+        st.markdown("---")
+        col_s, col_c = st.columns([1, 5])
+        with col_s:
+            save_clicked = st.button("💾 保存", type="primary", key="color_rule_save")
+        with col_c:
+            cancel_clicked = st.button("✖ キャンセル", key="color_rule_cancel")
+
+        if save_clicked:
+            if not new_name.strip():
+                st.error("ルール名を入力してください。")
+            else:
+                clean_groups = [g for g in groups if g["keywords"]]
+                if is_new:
+                    new_id = str(int(datetime.datetime.now().timestamp() * 1000))
+                    all_color_rules.append(
+                        {"id": new_id, "name": new_name.strip(), "groups": clean_groups}
+                    )
+                else:
+                    found = False
+                    for r in all_color_rules:
+                        if r["id"] == editing["id"]:
+                            r["name"] = new_name.strip()
+                            r["groups"] = clean_groups
+                            found = True
+                            break
+                    if not found:
+                        all_color_rules.append(
+                            {"id": editing["id"], "name": new_name.strip(), "groups": clean_groups}
+                        )
+                save_color_rules_list(all_color_rules)
+                ok, msg = push_color_rules_list_to_github(all_color_rules)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(f"アプリには保存済みです。GitHub更新に失敗しました：{msg}")
+                del st.session_state["color_rule_editing"]
+                st.session_state.pop("color_rule_edit_version", None)
+                st.rerun()
+        if cancel_clicked:
+            del st.session_state["color_rule_editing"]
+            st.session_state.pop("color_rule_edit_version", None)
+            st.rerun()
+
+    else:
+        if st.button("➕ 新しい色付けルールを追加", type="primary", key="color_rule_new"):
+            st.session_state["color_rule_editing"] = {"id": None, "name": "", "groups": []}
+            st.rerun()
+
+        st.markdown("---")
+        if not all_color_rules:
+            st.info("色付けルールがまだ登録されていません。上のボタンから追加してください。")
+        else:
+            st.markdown(f"**登録済み色付けルール：{len(all_color_rules)} 件**")
+            for rule in all_color_rules:
+                with st.container(border=True):
+                    col_n, col_e, col_d = st.columns([6, 1, 1])
+                    with col_n:
+                        st.markdown(f"**{rule['name']}**")
+                        for g in rule["groups"]:
+                            swatch = (
+                                f"<span style='display:inline-block;width:14px;height:14px;"
+                                f"background:#{g['color']};border:1px solid #999;"
+                                f"margin-right:6px;vertical-align:middle;'></span>"
+                            )
+                            st.markdown(f"{swatch}{', '.join(g['keywords'])}", unsafe_allow_html=True)
+                    with col_e:
+                        if st.button("✏ 編集", key=f"color_edit_{rule['id']}"):
+                            st.session_state["color_rule_editing"] = {
+                                "id": rule["id"],
+                                "name": rule["name"],
+                                "groups": [dict(g) for g in rule["groups"]],
+                            }
+                            st.rerun()
+                    with col_d:
+                        confirm_key = f"color_confirm_del_{rule['id']}"
+                        if st.session_state.get(confirm_key):
+                            if st.button("本当に削除", key=f"color_yes_{rule['id']}", type="primary"):
+                                all_color_rules = [r for r in all_color_rules if r["id"] != rule["id"]]
+                                save_color_rules_list(all_color_rules)
+                                push_color_rules_list_to_github(all_color_rules)
+                                del st.session_state[confirm_key]
+                                st.rerun()
+                        else:
+                            if st.button("🗑 削除", key=f"color_del_{rule['id']}"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
+
+
+elif page == "🔄 置換ルール管理":
+    st.title("🔄 置換ルール管理")
+    st.caption(
+        "「材料名A→材料名B」のような園独自の言い換えペアを複数登録できます。"
+        "チェック画面の「置換Excel生成」で使うほか、チェック実行時に「置換前の単語」が"
+        "残っていないかの検出にも使えます。保存はGitHubにも自動反映されます。"
+    )
+
+    all_replace_rules = load_replace_rules_list()
+    editing = st.session_state.get("replace_rule_editing")
+    # editing = {"id": str|None, "name": str, "pairs": [{"from": str, "to": str}, ...]}
+
+    if editing is not None:
+        is_new = editing["id"] is None
+        st.subheader("➕ 新しい置換ルールを追加" if is_new else f"✏️ 編集：{editing['name']}")
+
+        new_name = st.text_input(
+            "ルール名（例：くにみ子ども園 置換ルール など）",
+            value=editing["name"],
+            max_chars=50,
+            key="replace_rule_name_input",
+        )
+
+        st.markdown("**置換ペア**（置換前 → 置換後）")
+        pairs = editing["pairs"]
+        ver = st.session_state.setdefault("replace_rule_edit_version", 0)
+
+        for i, p in enumerate(pairs):
+            col_from, col_to, col_del = st.columns([3, 3, 1])
+            with col_from:
+                new_from = st.text_input(
+                    f"置換前 {i + 1}", value=p["from"],
+                    key=f"replace_pair_from_{ver}_{i}", label_visibility="collapsed",
+                    placeholder="例：かまぼこ",
+                )
+                p["from"] = new_from.strip()
+            with col_to:
+                new_to = st.text_input(
+                    f"置換後 {i + 1}", value=p["to"],
+                    key=f"replace_pair_to_{ver}_{i}", label_visibility="collapsed",
+                    placeholder="例：のべ板",
+                )
+                p["to"] = new_to.strip()
+            with col_del:
+                if st.button("🗑", key=f"replace_pair_del_{ver}_{i}"):
+                    pairs.pop(i)
+                    st.session_state["replace_rule_edit_version"] = ver + 1
+                    st.rerun()
+
+        if st.button("＋ ペアを追加", key="replace_pair_add"):
+            pairs.append({"from": "", "to": ""})
+            st.session_state["replace_rule_edit_version"] = ver + 1
+            st.rerun()
+
+        st.markdown("---")
+        col_s, col_c = st.columns([1, 5])
+        with col_s:
+            save_clicked = st.button("💾 保存", type="primary", key="replace_rule_save")
+        with col_c:
+            cancel_clicked = st.button("✖ キャンセル", key="replace_rule_cancel")
+
+        if save_clicked:
+            if not new_name.strip():
+                st.error("ルール名を入力してください。")
+            else:
+                clean_pairs = [p for p in pairs if p["from"]]
+                if is_new:
+                    new_id = str(int(datetime.datetime.now().timestamp() * 1000))
+                    all_replace_rules.append(
+                        {"id": new_id, "name": new_name.strip(), "pairs": clean_pairs}
+                    )
+                else:
+                    found = False
+                    for r in all_replace_rules:
+                        if r["id"] == editing["id"]:
+                            r["name"] = new_name.strip()
+                            r["pairs"] = clean_pairs
+                            found = True
+                            break
+                    if not found:
+                        all_replace_rules.append(
+                            {"id": editing["id"], "name": new_name.strip(), "pairs": clean_pairs}
+                        )
+                save_replace_rules_list(all_replace_rules)
+                ok, msg = push_replace_rules_list_to_github(all_replace_rules)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(f"アプリには保存済みです。GitHub更新に失敗しました：{msg}")
+                del st.session_state["replace_rule_editing"]
+                st.session_state.pop("replace_rule_edit_version", None)
+                st.rerun()
+        if cancel_clicked:
+            del st.session_state["replace_rule_editing"]
+            st.session_state.pop("replace_rule_edit_version", None)
+            st.rerun()
+
+    else:
+        if st.button("➕ 新しい置換ルールを追加", type="primary", key="replace_rule_new"):
+            st.session_state["replace_rule_editing"] = {"id": None, "name": "", "pairs": []}
+            st.rerun()
+
+        st.markdown("---")
+        if not all_replace_rules:
+            st.info("置換ルールがまだ登録されていません。上のボタンから追加してください。")
+        else:
+            st.markdown(f"**登録済み置換ルール：{len(all_replace_rules)} 件**")
+            for rule in all_replace_rules:
+                with st.container(border=True):
+                    col_n, col_e, col_d = st.columns([6, 1, 1])
+                    with col_n:
+                        st.markdown(f"**{rule['name']}**")
+                        preview = " ／ ".join(f"{p['from']}→{p['to']}" for p in rule["pairs"][:6])
+                        if len(rule["pairs"]) > 6:
+                            preview += " …"
+                        st.caption(preview or "（ペア未登録）")
+                    with col_e:
+                        if st.button("✏ 編集", key=f"replace_edit_{rule['id']}"):
+                            st.session_state["replace_rule_editing"] = {
+                                "id": rule["id"],
+                                "name": rule["name"],
+                                "pairs": [dict(p) for p in rule["pairs"]],
+                            }
+                            st.rerun()
+                    with col_d:
+                        confirm_key = f"replace_confirm_del_{rule['id']}"
+                        if st.session_state.get(confirm_key):
+                            if st.button("本当に削除", key=f"replace_yes_{rule['id']}", type="primary"):
+                                all_replace_rules = [r for r in all_replace_rules if r["id"] != rule["id"]]
+                                save_replace_rules_list(all_replace_rules)
+                                push_replace_rules_list_to_github(all_replace_rules)
+                                del st.session_state[confirm_key]
+                                st.rerun()
+                        else:
+                            if st.button("🗑 削除", key=f"replace_del_{rule['id']}"):
                                 st.session_state[confirm_key] = True
                                 st.rerun()
