@@ -362,7 +362,11 @@ def _detect_sheet_format(df):
         return 'yumehana'
     if '初期・アレルギーには' in all_text:  # 歩学園バンビ形式（離乳食・datetime日付・おやつcol8-9）
         return 'ayumi'
-    if '材料表' in all_text:  # 山崎幼稚園形式（横並び・3列/日）
+    # 山崎幼稚園形式（横並び・3列/日）：セル単体が「材料表」と完全一致する場合のみ判定。
+    # 部分一致にすると「献立材料表」のようなタイトル文言を含む他園（例：東久留米おひさま）を
+    # 誤って山崎形式と判定してしまう（列オフセットが異なるため誤爆する）。
+    cell_values = {str(v).strip() for v in df.values.flatten() if pd.notna(v)}
+    if '材料表' in cell_values:
         return 'yamazaki'
     return 'default'
 
