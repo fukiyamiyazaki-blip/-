@@ -13,7 +13,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt, RGBColor, Cm
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import PatternFill, Border, Side
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
 from openpyxl.utils import get_column_letter
 
 try:
@@ -1532,6 +1532,61 @@ def table_to_docx(markdown_text):
     return bio
 
 
+_XLS_HALIGN = {1: 'left', 2: 'center', 3: 'right', 4: 'fill', 5: 'justify',
+               6: 'centerContinuous', 7: 'distributed'}
+_XLS_VALIGN = {0: 'top', 1: 'center', 2: 'bottom', 3: 'justify', 4: 'distributed'}
+
+
+def _xls_font_to_openpyxl(xls_book, font_index):
+    """xlrdのフォント情報をopenpyxlのFontに変換（フォント名・サイズ・太字・斜体・色）。"""
+    try:
+        f = xls_book.font_list[font_index]
+    except (IndexError, TypeError):
+        return None
+    color = None
+    if f.colour_index and f.colour_index != 32767:
+        rgb = xls_book.colour_map.get(f.colour_index)
+        if rgb:
+            color = f'{rgb[0]:02X}{rgb[1]:02X}{rgb[2]:02X}'
+    return Font(
+        name=f.name or None,
+        size=(f.height / 20) if f.height else None,
+        bold=bool(f.bold),
+        italic=bool(f.italic),
+        color=color,
+    )
+
+
+def _xls_alignment_to_openpyxl(xf):
+    """xlrdのXF配置情報をopenpyxlのAlignmentに変換。"""
+    return Alignment(
+        horizontal=_XLS_HALIGN.get(xf.alignment.hor_align),
+        vertical=_XLS_VALIGN.get(xf.alignment.vert_align),
+        wrap_text=bool(xf.alignment.text_wrapped),
+    )
+
+
+def _xls_print_area_range(xls_book, sheet_index):
+    """xlrdの定義済み名前「Print_Area」から該当シートの印刷範囲を
+    openpyxlの print_area 文字列（例："A1:BN105"）として返す。無ければNone。"""
+    names = xls_book.name_map.get('print_area')
+    if not names:
+        return None
+    for name_obj in names:
+        try:
+            sheet_obj, row_lo, row_hi, col_lo, col_hi = name_obj.area2d()
+        except Exception:
+            continue
+        if sheet_obj.number != sheet_index:
+            continue
+        if row_hi <= row_lo or col_hi <= col_lo:
+            continue
+        start = f'{get_column_letter(col_lo + 1)}{row_lo + 1}'
+        end = f'{get_column_letter(col_hi)}{row_hi}'
+        return f'{start}:{end}'
+    return None
+
+
 def create_colored_excel(uploaded_file, color_groups=None):
     """
     全シートを色付きにして .xlsx で返す。フォーマット自動検出により
@@ -1756,14 +1811,27 @@ def create_colored_excel(uploaded_file, color_groups=None):
                     try:
                         xf = xls_wb.xf_list[xls_ws.cell_xf_index(r_i, c_i)]
                         b = xf.border
-                        ws.cell(row=r_i + 1, column=c_i + 1).border = Border(
+                        cell = ws.cell(row=r_i + 1, column=c_i + 1)
+                        cell.border = Border(
                             left=_side(b.left_line_style, b.left_colour_index),
                             right=_side(b.right_line_style, b.right_colour_index),
                             top=_side(b.top_line_style, b.top_colour_index),
                             bottom=_side(b.bottom_line_style, b.bottom_colour_index),
                         )
+                        font = _xls_font_to_openpyxl(xls_wb, xf.font_index)
+                        if font is not None:
+                            cell.font = font
+                        cell.alignment = _xls_alignment_to_openpyxl(xf)
+                        fmt = xls_wb.format_map.get(xf.format_key)
+                        if fmt and fmt.format_str:
+                            cell.number_format = fmt.format_str
                     except Exception:
                         pass
+
+            # 印刷範囲（Print_Area）を元ファイルと同じ範囲に設定
+            print_range = _xls_print_area_range(xls_wb, xls_wb.sheet_names().index(sh_name))
+            if print_range:
+                ws.print_area = print_range
 
             # フォーマット検出
             df_sh = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
@@ -1902,14 +1970,27 @@ def apply_replacements_to_excel(uploaded_file, pairs):
                 try:
                     xf = xls_wb.xf_list[xls_ws.cell_xf_index(r_i, c_i)]
                     b = xf.border
-                    ws.cell(row=r_i + 1, column=c_i + 1).border = Border(
+                    cell = ws.cell(row=r_i + 1, column=c_i + 1)
+                    cell.border = Border(
                         left=_side(b.left_line_style, b.left_colour_index),
                         right=_side(b.right_line_style, b.right_colour_index),
                         top=_side(b.top_line_style, b.top_colour_index),
                         bottom=_side(b.bottom_line_style, b.bottom_colour_index),
                     )
+                    font = _xls_font_to_openpyxl(xls_wb, xf.font_index)
+                    if font is not None:
+                        cell.font = font
+                    cell.alignment = _xls_alignment_to_openpyxl(xf)
+                    numfmt = xls_wb.format_map.get(xf.format_key)
+                    if numfmt and numfmt.format_str:
+                        cell.number_format = numfmt.format_str
                 except Exception:
                     pass
+
+        # 印刷範囲（Print_Area）を元ファイルと同じ範囲に設定
+        print_range = _xls_print_area_range(xls_wb, xls_wb.sheet_names().index(sh_name))
+        if print_range:
+            ws.print_area = print_range
 
     bio = BytesIO()
     wb.save(bio)
