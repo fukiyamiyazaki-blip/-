@@ -2000,46 +2000,6 @@ def apply_replacements_to_excel(uploaded_file, pairs):
     return bio
 
 
-def clean_result_column(text):
-    """AI出力の結果列を後処理：OK説明文を強制除去してOK/●NGのみにする"""
-    # これらのいずれかを含む●セルは「実NGなし」とみなしてOKに変換
-    no_real_ng_patterns = [
-        r'OK\s*$',            # 末尾がOK（→OK、/ OKなど含む）
-        r'実NG[無な]し',      # 実NG無し / 実NGなし
-        r'NG[無な]し',        # NGなし / NG無し
-        r'OK扱い',            # OK扱い不可 / OK扱い等
-        r'問題[無な]し',      # 問題なし / 問題無し
-        r'許容$',             # 末尾が「許容」
-        r'対象外\s*$',        # 末尾が「対象外」
-        r'ではないが',        # 「月曜ではないがロールパン使用」等の非該当説明
-        r'重複[無な]し',      # 重複なし / 重複無し（同日重複チェックでOKの場合）
-    ]
-
-    lines = text.split('\n')
-    cleaned = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith('|') and not re.match(r'\|[\s\-|]+\|', stripped):
-            parts = stripped.split('|')
-            if len(parts) >= 3:
-                cell = parts[-2].strip()
-                # 「●」で始まらない表現は「OK」に変換
-                if cell and not cell.startswith('●'):
-                    cell = 'OK'
-                elif cell:
-                    # 「●」で始まるが実NGなしを示すパターンが含まれる → OK
-                    for pat in no_real_ng_patterns:
-                        if re.search(pat, cell):
-                            cell = 'OK'
-                            break
-                parts[-2] = f' {cell} '
-                line = '|'.join(parts)
-        cleaned.append(line)
-    result = '\n'.join(cleaned)
-    result = re.sub(r'<br\s*/?>', ' ／ ', result, flags=re.IGNORECASE)
-    return result
-
-
 def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     """
     全ルールベースNGをPythonで計算。
@@ -2510,38 +2470,19 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     return '\n'.join(lines), day_ngs
 
 
-def run_check(excel_text, rules_text, api_key, file_name, sheet_name, leftover_words=None):
+def _ai_name_ingredient_check(excel_text, api_key):
+    """
+    AIに「献立名と材料の照合チェック」のみを狭く依頼する。
+    表全体の書き写しはさせず、見つけた問題だけを1行1件で報告させることで、
+    LLMがPython確定NGを表に転記し損なう（行を落とす）リスクを排除する。
+    Returns: {date_label: [ng_str, ...]}
+    """
     client = anthropic.Anthropic(api_key=api_key)
-    python_ng_text, _ = compute_all_python_ngs(excel_text, rules_text, leftover_words)
-
     prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
-担当は「ステップ４：献立名と材料の照合チェック」のみです。
-その他の全ルール（連続使用・禁止食材・週次・月上限など）はPythonが計算済みです。
+以下のエクセルデータについて【献立名と材料の照合チェック】のみを行ってください。
 
-========================================
-# エクセルデータ（ファイル：{file_name}　シート：{sheet_name}）
-========================================
-【月/日(曜日)】
-昼食: 献立名1 / 献立名2 / ...
-おやつ: おやつ名1 / ...
-材料: 材料名1, 材料名2, ...
-
-{excel_text}
-
-========================================
-# Python確定NGリスト（必ず結果欄に転記すること）
-========================================
-以下は全ルールをPythonで計算済みの確定NGです。
-AIは再計算せず、そのまま結果欄に記入してください。
-
-{python_ng_text}
-
-========================================
-# あなたが担当するチェック（ステップ４のみ）
-========================================
-【献立名と材料の照合チェック】
-同じ日の【献立名】と【材料】を照らし合わせ、
-献立名に入っている食材が材料欄にない場合はNG。
+・同じ日の【献立名】に入っている食材が、その日の【材料】欄に見当たらない場合だけ報告する
+・それ以外のルール（連続使用・週次・月上限など）は一切チェックしないでください（別途計算済みのため対象外）
 
 例外（NG対象外）：
 ・「ごはん」「おにぎり」→ 白米があればOK
@@ -2552,35 +2493,75 @@ AIは再計算せず、そのまま結果欄に記入してください。
 ・「オレンジ蒸しパン」などオレンジ風味の料理 → マーマレードがあればOK（オレンジ・みかんがなくても可）
 
 ========================================
+# エクセルデータ
+========================================
+{excel_text}
+
+========================================
 # 出力形式（絶対厳守）
 ========================================
-マークダウンテーブルのみ。前後に文章・注釈禁止。
+問題が見つかった日付だけ、1行に1件、次の形式で出力してください。
+問題が1件もなければ何も出力しないでください（前後の文章・説明・表組みは一切不要）。
 
-| 日付 | 献立名 | おやつ | 結果 |
-|------|--------|--------|------|
+日付ラベル: ●理由
 
-【結果欄のルール】
-・Python確定NGがある日 → そのNGをそのまま記入（複数なら改行で並べる）
-・ステップ４でNGが見つかった日 → 「● ○○が材料欄にない」を追記
-・どちらもなければ → 「OK」の2文字のみ
-
-【絶対禁止】
-× Python確定NGにないルールベースNGを自分で書く
-× 「OK（確認済み）」「● ○○なし → OK」などOK説明文
-× テーブル以外の文章
-
-【その他】
-・献立名はスラッシュ「/」でつなぐ
-・おやつがない日は空欄
-・給食のない日は出力しない
+・日付ラベルは上記データの【】内の表記（例：8/4(火)）をそのまま使うこと
+・「● ○○があるが材料に○○がない」のように具体的に書くこと
+・OKだった日や問題がない日については何も書かないこと
 """
-
     message = client.messages.create(
         model="claude-opus-4-8",
-        max_tokens=8000,
+        max_tokens=4000,
         messages=[{"role": "user", "content": prompt}],
     )
-    return clean_result_column(message.content[0].text)
+    raw = message.content[0].text
+
+    _NOT_REAL_NG = re.compile(
+        r'OK\s*$|実NG[無な]し|NG[無な]し|OK扱い|問題[無な]し|許容$|対象外\s*$|重複[無な]し'
+    )
+    ai_ngs = {}
+    for line in raw.split('\n'):
+        line = line.strip().lstrip('|').rstrip('|').strip()
+        m = re.match(r'^([^\s:：]+\([月火水木金土日]\))\s*[:：]\s*(.+)$', line)
+        if not m:
+            continue
+        date_label, reason = m.group(1), m.group(2).strip()
+        if not reason or _NOT_REAL_NG.search(reason):
+            continue
+        if not reason.startswith('●'):
+            reason = f'● {reason}'
+        ai_ngs.setdefault(date_label, []).append(reason)
+    return ai_ngs
+
+
+def build_result_table(sorted_dates, entries, day_ngs):
+    """day_ngs（Python確定NG＋AIのステップ4分をマージ済み）から最終結果テーブルを
+    Pythonで確定的に組み立てる。AIに表の書き写しをさせないため、Python確定NGが
+    行ごと欠落することがない。"""
+    lines = ['| 日付 | 献立名 | おやつ | 結果 |', '|------|--------|--------|------|']
+    for ds in sorted_dates:
+        lunch_text = entries[ds]['lunch']
+        snack_text = entries[ds]['snack']
+        ngs = day_ngs.get(ds, [])
+        result = ' ／ '.join(ngs) if ngs else 'OK'
+        lines.append(f'| {ds} | {lunch_text} | {snack_text} | {result} |')
+    return '\n'.join(lines)
+
+
+def run_check(excel_text, rules_text, api_key, file_name, sheet_name, leftover_words=None):
+    _, day_ngs = compute_all_python_ngs(excel_text, rules_text, leftover_words)
+    year, month_num, sorted_dates, entries = _parse_structured(excel_text)
+    if not sorted_dates:
+        return "| 日付 | 献立名 | おやつ | 結果 |\n|------|--------|--------|------|"
+
+    ai_ngs = _ai_name_ingredient_check(excel_text, api_key)
+    for date_label, ngs in ai_ngs.items():
+        if date_label in day_ngs:
+            for ng in ngs:
+                if ng not in day_ngs[date_label]:
+                    day_ngs[date_label].append(ng)
+
+    return build_result_table(sorted_dates, entries, day_ngs)
 
 
 with st.sidebar:
