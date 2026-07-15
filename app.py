@@ -1806,6 +1806,32 @@ def compute_all_python_ngs(excel_text, rules_text=""):
                         missing = '・'.join(required_any)
                         day_ngs[ds].append(f'● 「{kw}」があるが材料に{missing}なし')
 
+        # ── 献立名の果物名と材料の果物が一致しないチェック ────────
+        # （例：「パインパンケーキ」なのに材料が「みかん缶」など、別の果物に
+        #   すり替わっているケースを検出。表記ゆれ（パイン/パイナップル等）は同一視する）
+        FRUIT_GROUPS = [
+            ['パイン', 'パイナップル'],
+            ['もも', '桃'],
+            ['いちご', 'イチゴ'],
+            ['ぶどう', 'ブドウ'],
+            ['すいか', 'スイカ'],
+            ['なし', '梨'],
+            ['みかん'],
+            ['りんご'],
+            ['バナナ'],
+            ['オレンジ', 'マーマレード'],  # 「オレンジ蒸しパン」等はマーマレードがあればOK
+            ['メロン'],
+            ['キウイ'],
+            ['マンゴー'],
+            ['さくらんぼ'],
+        ]
+        for ds in sorted_dates:
+            ls_text = lunch(ds) + ' ' + snack(ds)
+            i_text  = ing(ds)
+            for group in FRUIT_GROUPS:
+                if any(g in ls_text for g in group) and not any(g in i_text for g in group):
+                    day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（別の果物に違っていないか要確認）')
+
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
