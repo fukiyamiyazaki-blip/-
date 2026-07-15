@@ -72,7 +72,27 @@ def save_rules(text):
 
 
 def load_rules_list():
-    """複数ルールをリストで返す。なければ rules.txt から移行。"""
+    """複数ルールをリストで返す。GitHubを優先し、失敗時のみローカル→rules.txtにフォールバック。"""
+    token = get_github_token()
+    if token:
+        api_url = (
+            f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+            f"/contents/{GITHUB_RULES_JSON_PATH}?ref={GITHUB_BRANCH}"
+        )
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        req = urllib.request.Request(api_url, headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+                content = base64.b64decode(data["content"]).decode("utf-8")
+                return json.loads(content).get("rules", [])
+        except Exception:
+            pass  # GitHub取得失敗 → ローカルにフォールバック
+
+    # ローカルファイルにフォールバック
     if RULES_JSON_FILE.exists():
         try:
             data = json.loads(RULES_JSON_FILE.read_text(encoding="utf-8"))
@@ -87,11 +107,14 @@ def load_rules_list():
 
 
 def save_rules_list(rules_list):
-    """複数ルールをJSON保存。"""
-    RULES_JSON_FILE.write_text(
-        json.dumps({"rules": rules_list}, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    """複数ルールをJSON保存（ローカル）。失敗してもエラーを出さない。"""
+    try:
+        RULES_JSON_FILE.write_text(
+            json.dumps({"rules": rules_list}, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
+    except Exception:
+        pass  # Streamlit Cloud では書き込み不可の場合もあるが GitHub が主ストレージ
 
 
 # ─────────────────────────────────────────────
@@ -1880,10 +1903,15 @@ if page == "📋 献立チェック":
             all_rules = load_rules_list()
             if not all_rules:
                 st.warning("ルールが登録されていません。「ルール管理」ページでルールを追加してください。")
+                chosen_name = ""
                 selected_rule_text = ""
             else:
                 rule_names = [r["name"] for r in all_rules]
-                chosen_name = st.selectbox("ルール", rule_names, label_visibility="collapsed")
+                chosen_name = st.selectbox(
+                    "ルール", rule_names,
+                    key="rule_selector",
+                    label_visibility="collapsed"
+                )
                 selected_rule_text = next(
                     (r["text"] for r in all_rules if r["name"] == chosen_name), ""
                 )
@@ -1925,6 +1953,7 @@ if page == "📋 献立チェック":
                             st.session_state["last_result"] = result
                             st.session_state["last_filename"] = uploaded.name
                             st.session_state["last_sheet"] = selected_sheet
+                            st.session_state["last_rule_name"] = chosen_name
                         except Exception as e:
                             st.error(f"エラーが発生しました: {e}")
                             result = None
@@ -1933,7 +1962,10 @@ if page == "📋 献立チェック":
                 st.markdown("---")
                 _fname_disp = st.session_state.get("last_filename", "")
                 _sheet_disp = st.session_state.get("last_sheet", "")
+                _rule_disp = st.session_state.get("last_rule_name", "")
                 st.subheader(f"チェック結果 ― {_fname_disp}　シート: {_sheet_disp}")
+                if _rule_disp:
+                    st.caption(f"使用ルール：{_rule_disp}")
                 result_text = st.session_state["last_result"]
                 st.markdown(result_text)
                 fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
