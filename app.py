@@ -265,6 +265,8 @@ def _detect_sheet_format(df):
         return 'sakae'
     if '◎は10時おやつ' in all_text or ('材料名' in all_text and '献立名' in all_text):
         return 'omiya'
+    if 'つかみ食べ練習用野菜' in all_text:  # 美山保育園形式（月別シート・datetime日付・おやつcol10）
+        return 'miyama'
     if 'うどんの日以外はおかゆ' in all_text:  # めばえの森（yumehanaより先に判定）
         return 'mebaenomori'
     if '初期には入りません' in all_text or 'おかゆが付きます' in all_text:
@@ -791,6 +793,108 @@ def _excel_to_text_ayumi(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_miyama(df):
+    """美山保育園形式（月別シート・datetime日付・離乳食・おやつcol10）→ 構造化テキスト"""
+    n_rows, n_cols = df.shape
+    _DOW = '月火水木金土日'
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    def clean_mat(v):
+        return v.replace('＊', '').replace('*', '').strip()
+
+    _NOTE = ('*印は初期には入りません', '麺の日以外の主食', '初期におやつ',
+             'お菓子は、', '富喜屋', '株式会社', 'ここに日、祝',
+             'つかみ食べ練習用野菜', '給食提供が無い日')
+
+    year_num, month_num = 0, 0
+    days = {}
+    day_order = []
+
+    def _parse_snack(text):
+        if not text:
+            return None, []
+        text = re.sub(r'\s+', ' ', text.replace('\n', ' '))
+        m = re.search(r'[（(]([^）)]+)[）)]', text)
+        if m:
+            name = text[:m.start()].strip()
+            ings = [clean_mat(s.strip()) for s in re.split(r'[,、\s・]+', m.group(1)) if s.strip()]
+        else:
+            name = text.strip()
+            ings = []
+        return name or None, ings
+
+    for r in range(n_rows):
+        col0 = cv(r, 0)
+        col2 = cv(r, 2)
+
+        dm = re.match(r'^(\d{4})-(\d{2})-(\d{2})', col0)
+        if dm:
+            y, mo, day_i = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
+            if not year_num:
+                year_num, month_num = y, mo
+            if y != year_num or mo != month_num:
+                continue  # 別月（祝日リスト等）はスキップ
+            try:
+                dow = _DOW[datetime.date(y, mo, day_i).weekday()]
+            except Exception:
+                dow = '?'
+            label = f"{mo}/{day_i}({dow})"
+            if label not in days:
+                days[label] = {'lunch': [], 'snack': [], 'mats': []}
+                day_order.append(label)
+
+            if col2 and not any(n in col2 for n in _NOTE):
+                days[label]['lunch'].append(col2)
+            for c in range(3, min(10, n_cols)):
+                v = clean_mat(cv(r, c))
+                if v and not any(n in v for n in _NOTE):
+                    days[label]['mats'].append(v)
+
+            # おやつ（col10: 中期〜後期）
+            sv = cv(r, 10)
+            if sv and not any(n in sv for n in _NOTE):
+                sname, sings = _parse_snack(sv)
+                if sname and sname not in days[label]['snack']:
+                    days[label]['snack'].append(sname)
+                days[label]['mats'].extend(sings)
+
+        elif col0 == '' and day_order:
+            row_text = ' '.join(cv(r, c) for c in range(n_cols))
+            if any(n in row_text for n in _NOTE):
+                continue
+            label = day_order[-1]
+            if col2 and not any(n in col2 for n in _NOTE):
+                days[label]['lunch'].append(col2)
+            for c in range(3, min(10, n_cols)):
+                v = clean_mat(cv(r, c))
+                if v and not any(n in v for n in _NOTE):
+                    days[label]['mats'].append(v)
+
+    lines = []
+    if year_num and month_num:
+        lines += [f"# 献立データ {year_num}年{month_num:02d}月", ""]
+
+    for label in day_order:
+        d = days[label]
+        if not d['lunch'] and not d['mats']:
+            continue
+        lines.append(f"【{label}】")
+        if d['lunch']:
+            lines.append(f"昼食: {' / '.join(d['lunch'])}")
+        if d['snack']:
+            lines.append(f"おやつ: {' / '.join(d['snack'])}")
+        if d['mats']:
+            lines.append(f"材料: {', '.join(d['mats'])}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
 def get_sheet_names(uploaded_file):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
     try:
@@ -821,6 +925,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_yamazaki(df)
     if fmt == 'ayumi':
         return _excel_to_text_ayumi(df)
+    if fmt == 'miyama':
+        return _excel_to_text_miyama(df)
 
     n_rows, n_cols = df.shape
 
@@ -1098,8 +1204,8 @@ def create_colored_excel(uploaded_file):
                         if any(kw in v for kw in kw_list):
                             af_fn(r, col_c + 1, fc)
                             break
-        elif fmt == 'ayumi':
-            # 歩学園: col3〜col9が材料（ゆめのはな・めばえの森と同じ列レイアウト）
+        elif fmt in ('ayumi', 'miyama'):
+            # 歩学園・美山保育園: col3〜col9が材料
             for r in range(n_rows):
                 for c in range(3, min(10, n_cols)):
                     v = cv_fn(r, c)
