@@ -258,7 +258,7 @@ def push_rules_to_github(text):
 # ─────────────────────────────────────────────
 
 def _detect_sheet_format(df):
-    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'default'"""
+    """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'yamazaki' / 'default'"""
     all_text = ' '.join(str(v) for v in df.values.flatten() if pd.notna(v))
     if '熱と力になるもの' in all_text:
         return 'sakae'
@@ -268,6 +268,8 @@ def _detect_sheet_format(df):
         return 'mebaenomori'
     if '初期には入りません' in all_text or 'おかゆが付きます' in all_text:
         return 'yumehana'
+    if '材料表' in all_text:  # 山崎幼稚園形式（横並び・3列/日）
+        return 'yamazaki'
     return 'default'
 
 
@@ -581,6 +583,106 @@ def _excel_to_text_mebaenomori(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_yamazaki(df):
+    """山崎幼稚園形式（横並び・2ブロック・3列/日・日付col_c/献立+材料col_c+1）→ 構造化テキスト"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    year_num, month_num, year_month = _extract_year_month(df)
+
+    _SKIP = {"[昼]", "[午後]", "献立名", "材料", "材料表", "日付", "区分",
+             "お箸もいります", "おはしもいります"}
+
+    def is_valid(v):
+        if not v or v in _SKIP:
+            return False
+        if v.startswith("※") or v.startswith("【"):
+            return False
+        try:
+            float(v)   # 数量（g数等）は除外
+            return False
+        except ValueError:
+            pass
+        return True
+
+    # 日付行を検索（「N日(曜)」パターンが3個以上ある行）
+    blocks = []
+    for r in range(n_rows):
+        temp = {}
+        for c in range(n_cols):
+            v = cv(r, c)
+            if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+                temp[c] = v
+        if len(temp) >= 3:
+            blocks.append((r, temp))
+
+    lines = []
+    if year_month:
+        lines += [f"# 献立データ {year_month}", ""]
+
+    for block_idx, (date_row, date_cols) in enumerate(blocks):
+        block_end = blocks[block_idx + 1][0] if block_idx + 1 < len(blocks) else n_rows
+
+        # 材料表開始行（col 1 が "材料表" または "材料"）
+        mat_row = None
+        for r in range(date_row + 1, block_end):
+            if cv(r, 1) in ("材料表", "材料"):
+                mat_row = r
+                break
+
+        dish_end = mat_row if mat_row is not None else block_end
+
+        for col_c in sorted(date_cols.keys()):
+            raw_date = date_cols[col_c]
+            dm = re.match(r'(\d+)日\(([月火水木金土日])\)', raw_date)
+            if dm and month_num:
+                date_label = f"{month_num}/{dm.group(1)}({dm.group(2)})"
+            else:
+                date_label = raw_date
+
+            # [午後]マーカーを col_c で検索（行は日によって異なる）
+            afternoon_start = dish_end
+            for r in range(date_row + 1, dish_end):
+                if cv(r, col_c) == "[午後]":
+                    afternoon_start = r
+                    break
+
+            # 昼食・おやつは col_c+1 から読む
+            lunch, snack = [], []
+            for r in range(date_row + 1, afternoon_start):
+                v = cv(r, col_c + 1)
+                if is_valid(v):
+                    lunch.append(v)
+            for r in range(afternoon_start, dish_end):
+                v = cv(r, col_c + 1)
+                if is_valid(v):
+                    snack.append(v)
+
+            # 材料は col_c+1 から読む（材料表セクション）
+            mats = []
+            if mat_row is not None:
+                for r in range(mat_row, block_end):
+                    v = cv(r, col_c + 1)
+                    if is_valid(v):
+                        mats.append(v)
+
+            lines.append(f"【{date_label}】")
+            if lunch:
+                lines.append(f"昼食: {' / '.join(lunch)}")
+            if snack:
+                lines.append(f"おやつ: {' / '.join(snack)}")
+            if mats:
+                lines.append(f"材料: {', '.join(mats)}")
+            lines.append("")
+
+    return '\n'.join(lines)
+
+
 def get_sheet_names(uploaded_file):
     engine = "xlrd" if uploaded_file.name.lower().endswith(".xls") else "openpyxl"
     try:
@@ -607,6 +709,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_mebaenomori(df)
     if fmt == 'yumehana':
         return _excel_to_text_yumehana(df)
+    if fmt == 'yamazaki':
+        return _excel_to_text_yamazaki(df)
 
     n_rows, n_cols = df.shape
 
@@ -866,6 +970,23 @@ def create_colored_excel(uploaded_file):
                     for kw_list, fc in ING_COLOR_RULES:
                         if any(kw in v for kw in kw_list):
                             af_fn(r, c, fc)
+                            break
+        elif fmt == 'yamazaki':
+            # 「N日(曜)」のcol_c+1が材料列（日付ごとに3列ずつ）
+            date_cols = set()
+            for r in range(n_rows):
+                for c in range(n_cols):
+                    v = cv_fn(r, c)
+                    if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+                        date_cols.add(c)
+            for col_c in date_cols:
+                for r in range(n_rows):
+                    v = cv_fn(r, col_c + 1)
+                    if not v:
+                        continue
+                    for kw_list, fc in ING_COLOR_RULES:
+                        if any(kw in v for kw in kw_list):
+                            af_fn(r, col_c + 1, fc)
                             break
         else:
             # 既存形式: 「N日(曜)」横並びブロック検出
