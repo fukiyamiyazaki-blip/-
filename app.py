@@ -395,7 +395,7 @@ def _parse_structured(excel_text):
 
 # 2日連続チェック免除（完全一致）
 _EXEMPT_EXACT = {
-    '白米', 'しょうが', 'にんにく', 'みそ', '酢', '白ごま',
+    '白米', '七分付き米', 'しょうが', 'にんにく', 'みそ', '酢', '白ごま',
     '人参', '玉ねぎ', '鶏肉', '豚肉', '牛肉', 'ひき肉',
     '昆布', 'かつお',  # 天然だし(かつお・昆布) をカッコ分割した際の破片を免除
     '昆布出し',  # 毎日使用OK（漢字表記のため'だし'部分一致に引っかからないため明示）
@@ -571,10 +571,11 @@ def _detect_sheet_format(df):
 
 
 def _extract_year_month(df):
-    """先頭10×10セルから年月を抽出。(year_int, month_int, label_str)"""
+    """先頭10行から年月を抽出。タイトルが右端の列にあるフォーマットもあるため
+    列は全て走査する（行のみ先頭10行に限定）。(year_int, month_int, label_str)"""
     n_rows, n_cols = df.shape
     for r in range(min(10, n_rows)):
-        for c in range(min(10, n_cols)):
+        for c in range(n_cols):
             v = str(df.iloc[r, c]).strip()
             m = re.match(r'(\d{4})年(\d{1,2})月', v)
             if m:
@@ -1362,15 +1363,16 @@ def excel_to_text(uploaded_file, sheet_name):
                 rows.append(f"行{i + 1}: " + " | ".join(cells))
         return "\n".join(rows)
 
-    # 年月を抽出（例：「2026年09月」）
+    # 年月を抽出（例：「2026年09月」）。タイトルが右端の列にあるフォーマットも
+    # あるため列は全て走査する（行のみ先頭10行に限定）。
     year_month = ""
     month_num = ""
     for r in range(min(10, n_rows)):
-        for c in range(min(10, n_cols)):
+        for c in range(n_cols):
             v = cell_val(r, c)
-            m = re.match(r'(\d{4})年(\d{2})月', v)
+            m = re.match(r'(\d{4})年(\d{1,2})月', v)
             if m:
-                year_month = f"{m.group(1)}年{m.group(2)}月"
+                year_month = f"{m.group(1)}年{int(m.group(2)):02d}月"
                 month_num = str(int(m.group(2)))
                 break
         if year_month:
@@ -2328,6 +2330,7 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('蒸しパン', ['ベーキングパウダー', 'BP', '重曹']),
             ('味噌汁',           ['みそ']),
             ('みそ汁',           ['みそ']),
+            ('わかめ',           ['わかめ']),  # 「わかめスープ」「わかめご飯」等
             ('果物',             FRUIT_KW),
             ('フルーツヨーグルト', FRUIT_KW),
             ('ヨーグルト',       ['ヨーグルト']),       # フルーツヨーグルト・桃ヨーグルト等すべて対象
