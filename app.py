@@ -30,11 +30,13 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).parent
 RULES_FILE = BASE_DIR / "rules.txt"
+RULES_JSON_FILE = BASE_DIR / "rules.json"
 
 GITHUB_OWNER = "fukiyamiyazaki-blip"
 GITHUB_REPO = "-"
 GITHUB_BRANCH = "main"
 GITHUB_RULES_PATH = "rules.txt"
+GITHUB_RULES_JSON_PATH = "rules.json"
 
 # Streamlit の C キーショートカット（キャッシュクリア）を無効化
 components.html("""
@@ -67,6 +69,29 @@ def load_rules():
 
 def save_rules(text):
     RULES_FILE.write_text(text, encoding="utf-8")
+
+
+def load_rules_list():
+    """複数ルールをリストで返す。なければ rules.txt から移行。"""
+    if RULES_JSON_FILE.exists():
+        try:
+            data = json.loads(RULES_JSON_FILE.read_text(encoding="utf-8"))
+            return data.get("rules", [])
+        except Exception:
+            pass
+    # 後方互換: rules.txt があれば移行して初期ルールとして返す
+    legacy = load_rules()
+    if legacy.strip():
+        return [{"id": "default", "name": "共通ルール", "text": legacy}]
+    return []
+
+
+def save_rules_list(rules_list):
+    """複数ルールをJSON保存。"""
+    RULES_JSON_FILE.write_text(
+        json.dumps({"rules": rules_list}, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
 
 # ─────────────────────────────────────────────
@@ -246,6 +271,47 @@ def push_rules_to_github(text):
         "branch": GITHUB_BRANCH,
     }).encode("utf-8")
 
+    req = urllib.request.Request(api_url, data=payload, headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req):
+            return True, "保存しました（GitHub反映済み）"
+    except Exception as e:
+        return False, f"GitHub更新エラー: {e}"
+
+
+def push_rules_list_to_github(rules_list):
+    """複数ルール（rules.json）をGitHubに保存。"""
+    token = get_github_token()
+    if not token:
+        return False, "GitHubトークンが未設定です"
+
+    api_url = (
+        f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}"
+        f"/contents/{GITHUB_RULES_JSON_PATH}"
+    )
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+    }
+
+    sha = None
+    req = urllib.request.Request(
+        api_url + f"?ref={GITHUB_BRANCH}", headers=headers
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            sha = json.loads(resp.read())["sha"]
+    except Exception:
+        pass  # 新規ファイルの場合はSHAなし
+
+    content_text = json.dumps({"rules": rules_list}, ensure_ascii=False, indent=2)
+    body = {"message": "ルール管理から更新", "branch": GITHUB_BRANCH,
+            "content": base64.b64encode(content_text.encode("utf-8")).decode("utf-8")}
+    if sha:
+        body["sha"] = sha
+
+    payload = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(api_url, data=payload, headers=headers, method="PUT")
     try:
         with urllib.request.urlopen(req):
@@ -1810,7 +1876,19 @@ if page == "📋 献立チェック":
             st.markdown("### 2. シートを選択")
             selected_sheet = st.selectbox("シート", sheets)
 
-            st.markdown("### 3. 色付きExcel生成（目検用）")
+            st.markdown("### 3. 使用するルールを選択")
+            all_rules = load_rules_list()
+            if not all_rules:
+                st.warning("ルールが登録されていません。「ルール管理」ページでルールを追加してください。")
+                selected_rule_text = ""
+            else:
+                rule_names = [r["name"] for r in all_rules]
+                chosen_name = st.selectbox("ルール", rule_names, label_visibility="collapsed")
+                selected_rule_text = next(
+                    (r["text"] for r in all_rules if r["name"] == chosen_name), ""
+                )
+
+            st.markdown("### 4. 色付きExcel生成（目検用）")
             if st.button("🎨 色付きExcel生成（全シート）"):
                 with st.spinner("色付き処理中..."):
                     uploaded.seek(0)
@@ -1828,11 +1906,11 @@ if page == "📋 献立チェック":
                     key="dl_colored",
                 )
 
-            st.markdown("### 4. チェック開始")
+            st.markdown("### 5. チェック開始")
             if st.button("✅ チェックを開始する", type="primary", disabled=not api_key):
-                rules = load_rules()
+                rules = selected_rule_text
                 if not rules.strip():
-                    st.error("ルールファイルが空です。「ルール管理」ページでルールを設定してください。")
+                    st.error("ルールが選択されていないか空です。「ルール管理」ページでルールを設定してください。")
                 else:
                     with st.spinner("Excelデータを読み込んでいます..."):
                         uploaded.seek(0)
@@ -1871,20 +1949,98 @@ if page == "📋 献立チェック":
 
 elif page == "⚙️ ルール管理":
     st.title("⚙️ ルール管理")
-    st.caption("ルールを編集して「保存」を押すと、アプリとGitHubの両方に反映されます。")
+    st.caption("ルールを登録・編集すると、チェック画面のセレクトボックスに表示されます。保存はGitHubにも自動反映されます。")
 
-    current = load_rules()
-    edited = st.text_area("チェックルール", value=current, height=600)
+    all_rules = load_rules_list()
 
-    col1, col2 = st.columns([1, 5])
-    with col1:
-        if st.button("💾 保存", type="primary"):
-            save_rules(edited)
-            success, msg = push_rules_to_github(edited)
-            if success:
-                st.success(msg)
+    # ── 編集フォーム（新規追加 or 既存編集）────────────────────
+    editing = st.session_state.get("rule_editing")  # {"id": str|None, "name": str, "text": str}
+
+    if editing is not None:
+        is_new = editing["id"] is None
+        st.subheader("➕ 新しいルールを追加" if is_new else f"✏️ 編集：{editing['name']}")
+        with st.form("rule_form"):
+            new_name = st.text_input(
+                "ルール名（例：さかえ保育園、おおみや共通 など）",
+                value=editing["name"],
+                max_chars=50,
+            )
+            new_text = st.text_area(
+                "ルール本文",
+                value=editing["text"],
+                height=500,
+                help="このルールをAIに渡してチェックします。",
+            )
+            col_s, col_c = st.columns([1, 5])
+            with col_s:
+                submitted = st.form_submit_button("💾 保存", type="primary")
+            with col_c:
+                cancelled = st.form_submit_button("✖ キャンセル")
+
+        if submitted:
+            if not new_name.strip():
+                st.error("ルール名を入力してください。")
             else:
-                st.warning(f"アプリには保存済みです。GitHub更新に失敗しました：{msg}")
-    with col2:
-        if st.button("🔄 元に戻す（最後の保存時点）"):
+                if is_new:
+                    new_id = str(int(datetime.datetime.now().timestamp() * 1000))
+                    all_rules.append({"id": new_id, "name": new_name.strip(), "text": new_text})
+                else:
+                    for r in all_rules:
+                        if r["id"] == editing["id"]:
+                            r["name"] = new_name.strip()
+                            r["text"] = new_text
+                            break
+                save_rules_list(all_rules)
+                ok, msg = push_rules_list_to_github(all_rules)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.warning(f"アプリには保存済みです。GitHub更新に失敗しました：{msg}")
+                del st.session_state["rule_editing"]
+                st.rerun()
+        if cancelled:
+            del st.session_state["rule_editing"]
             st.rerun()
+
+    else:
+        if st.button("➕ 新しいルールを追加", type="primary"):
+            st.session_state["rule_editing"] = {"id": None, "name": "", "text": ""}
+            st.rerun()
+
+    # ── ルール一覧 ────────────────────────────────────────────
+    if editing is None:
+        st.markdown("---")
+        if not all_rules:
+            st.info("ルールがまだ登録されていません。上のボタンから追加してください。")
+        else:
+            st.markdown(f"**登録済みルール：{len(all_rules)} 件**")
+            for rule in all_rules:
+                with st.container(border=True):
+                    col_n, col_e, col_d = st.columns([6, 1, 1])
+                    with col_n:
+                        st.markdown(f"**{rule['name']}**")
+                        preview = rule["text"][:80].replace("\n", "  ") + ("…" if len(rule["text"]) > 80 else "")
+                        st.caption(preview)
+                    with col_e:
+                        if st.button("✏ 編集", key=f"edit_{rule['id']}"):
+                            st.session_state["rule_editing"] = {
+                                "id": rule["id"],
+                                "name": rule["name"],
+                                "text": rule["text"],
+                            }
+                            st.rerun()
+                    with col_d:
+                        # 削除: 1回目クリックで確認フラグ、2回目で実行
+                        confirm_key = f"confirm_del_{rule['id']}"
+                        if st.session_state.get(confirm_key):
+                            if st.button("本当に削除", key=f"yes_{rule['id']}",
+                                         type="primary"):
+                                all_rules = [r for r in all_rules if r["id"] != rule["id"]]
+                                save_rules_list(all_rules)
+                                push_rules_list_to_github(all_rules)
+                                del st.session_state[confirm_key]
+                                st.rerun()
+                        else:
+                            if st.button("🗑 削除", key=f"del_{rule['id']}"):
+                                st.session_state[confirm_key] = True
+                                st.rerun()
