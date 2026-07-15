@@ -1698,12 +1698,16 @@ def create_colored_excel(uploaded_file, color_groups=None):
             else:
                 ws = wb.create_sheet(title=sh_name[:31])
 
-            # 値をコピー
+            # 値をコピー（数値・日付セルは型を保持し、文字列化しない）
             for r_i in range(n_rows):
                 for c_i in range(n_cols):
                     v = xls_ws.cell_value(r_i, c_i)
-                    if v is not None and str(v).strip() not in ("nan", "", "None"):
+                    if v is None or str(v).strip() in ("nan", "", "None"):
+                        continue
+                    if xls_ws.cell_type(r_i, c_i) == _xlrd.XL_CELL_TEXT:
                         ws.cell(row=r_i + 1, column=c_i + 1, value=str(v).strip() or None)
+                    else:
+                        ws.cell(row=r_i + 1, column=c_i + 1, value=v)
 
             # マージセルをコピー（実データ範囲内のみ）
             for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
@@ -1840,12 +1844,16 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         else:
             ws = wb.create_sheet(title=sh_name[:31])
 
-        # 値をコピー（置換を適用しながら）
+        # 値をコピー（置換は文字列セルのみに適用。数値・日付セルは型を保持する）
         for r_i in range(n_rows):
             for c_i in range(n_cols):
                 v = xls_ws.cell_value(r_i, c_i)
-                if v is not None and str(v).strip() not in ("nan", "", "None"):
+                if v is None or str(v).strip() in ("nan", "", "None"):
+                    continue
+                if xls_ws.cell_type(r_i, c_i) == _xlrd.XL_CELL_TEXT:
                     ws.cell(row=r_i + 1, column=c_i + 1, value=_replace(str(v).strip()) or None)
+                else:
+                    ws.cell(row=r_i + 1, column=c_i + 1, value=v)
 
         # マージセルをコピー
         for row_lo, row_hi, col_lo, col_hi in xls_ws.merged_cells:
