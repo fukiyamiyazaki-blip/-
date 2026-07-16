@@ -555,6 +555,10 @@ def _detect_sheet_format(df):
         return 'miyama'
     if 'うどんの日以外はおかゆ' in all_text:  # めばえの森（yumehanaより先に判定）
         return 'mebaenomori'
+    if 'さかえ保育園' in all_text and '離乳食' in all_text:  # さかえ保育園 離乳食形式（2週間ローテーション・「日・日」表記）
+        return 'sakae_baby'
+    if '京町堀バンビ園' in all_text:  # 京町堀バンビ園形式（離乳食・Excelシリアル日付・おやつ単一列）
+        return 'kyomachibori'
     if '初期には入りません' in all_text or 'おかゆが付きます' in all_text:
         return 'yumehana'
     if '初期・アレルギーには' in all_text:  # 歩学園バンビ形式（離乳食・datetime日付・おやつcol8-9）
@@ -1086,6 +1090,202 @@ def _excel_to_text_ayumi(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_kyomachibori(df):
+    """京町堀バンビ園形式（離乳食・週別シート・Excelシリアル日付・おやつ単一列）→ 構造化テキスト"""
+    n_rows, n_cols = df.shape
+    _DOW = '月火水木金土日'
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    def clean_mat(v):
+        return v.replace('＊', '').replace('*', '').strip()
+
+    _NOTE = ('初期', '完了期', 'お菓子は', '株式会社', '主食は', 'アレルギー', 'gです',
+             '離乳食は', '大きさ等', '普通食を刻んで')
+
+    # ヘッダー行から「おやつ」列（材料欄の終端）を特定
+    snack_col = None
+    for r in range(min(5, n_rows)):
+        for c in range(n_cols):
+            if cv(r, c) == 'おやつ':
+                snack_col = c
+                break
+        if snack_col is not None:
+            break
+    mat_end_col = snack_col if snack_col is not None else n_cols
+
+    year_num, month_num = 0, 0
+    days = {}
+    day_order = []
+
+    for r in range(n_rows):
+        col0, col2 = cv(r, 0), cv(r, 2)
+
+        y = mo = day_i = None
+        dm = re.match(r'^(\d{4})-(\d{2})-(\d{2})', col0)
+        if dm:
+            y, mo, day_i = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
+        elif re.match(r'^\d{5}(\.0)?$', col0):
+            try:
+                d = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(float(col0)))
+                y, mo, day_i = d.year, d.month, d.day
+            except Exception:
+                pass
+
+        if y:
+            if not year_num:
+                year_num, month_num = y, mo
+            try:
+                dow = _DOW[datetime.date(y, mo, day_i).weekday()]
+            except Exception:
+                dow = '?'
+            label = f"{mo}/{day_i}({dow})"
+            if label not in days:
+                days[label] = {'lunch': [], 'snack': [], 'mats': []}
+                day_order.append(label)
+
+            if col2 and not any(n in col2 for n in _NOTE):
+                days[label]['lunch'].append(col2)
+            for c in range(3, mat_end_col):
+                v = clean_mat(cv(r, c))
+                if v and not re.match(r'^\d+(\.\d+)?$', v) and not any(n in v for n in _NOTE):
+                    days[label]['mats'].append(v)
+            if snack_col is not None:
+                sv = clean_mat(cv(r, snack_col))
+                if sv and sv != 'おやつ' and sv not in days[label]['snack']:
+                    days[label]['snack'].append(sv)
+
+        elif col0 == '' and day_order:
+            row_text = ' '.join(cv(r, c) for c in range(n_cols))
+            if any(n in row_text for n in _NOTE):
+                continue
+            label = day_order[-1]
+            if col2:
+                days[label]['lunch'].append(col2)
+            for c in range(3, mat_end_col):
+                v = clean_mat(cv(r, c))
+                if v and not re.match(r'^\d+(\.\d+)?$', v) and not any(n in v for n in _NOTE):
+                    days[label]['mats'].append(v)
+
+    lines = []
+    if year_num and month_num:
+        lines += [f"# 献立データ {year_num}年{month_num:02d}月", ""]
+
+    for label in day_order:
+        d = days[label]
+        if not d['lunch'] and not d['mats']:
+            continue
+        lines.append(f"【{label}】")
+        if d['lunch']:
+            lines.append(f"昼食: {' / '.join(d['lunch'])}")
+        if d['snack']:
+            lines.append(f"おやつ: {' / '.join(d['snack'])}")
+        if d['mats']:
+            lines.append(f"材料: {', '.join(d['mats'])}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
+def _excel_to_text_sakae_baby(df):
+    """さかえ保育園 離乳食形式（2週間ローテーション・「日・日」表記の日付）→ 構造化テキスト"""
+    n_rows, n_cols = df.shape
+    _DOW = '月火水木金土日'
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    def clean_mat(v):
+        return v.replace('＊', '').replace('*', '').strip()
+
+    _NOTE = ('初期には入りません', 'おかゆが付きます', '麦茶が付きます', '株式会社')
+
+    # 年月抽出：「2026年度　8月」のような表記に対応
+    year_num, month_num = 0, 0
+    for r in range(min(5, n_rows)):
+        for c in range(n_cols):
+            m = re.search(r'(\d{4})年度\s*(\d{1,2})月', cv(r, c))
+            if m:
+                year_num, month_num = int(m.group(1)), int(m.group(2))
+                break
+        if year_num:
+            break
+
+    days = {}
+    day_order = []
+
+    def _get_or_create(label):
+        if label not in days:
+            days[label] = {'lunch': [], 'mats': []}
+            day_order.append(label)
+        return days[label]
+
+    cur_labels = []  # 現在のブロックが対応する日付ラベル一覧（「N・M」で複数になる）
+
+    for r in range(n_rows):
+        col0, col1, col2 = cv(r, 0), cv(r, 1), cv(r, 2)
+        row_text = ' '.join(cv(r, c) for c in range(n_cols))
+        if any(n in row_text for n in _NOTE):
+            continue
+
+        if col0 and re.match(r'^[月火水木金土日]$', col1):
+            day_nums = [int(x) for x in re.split(r'[・,、]', col0) if x.strip().isdigit()]
+            cur_labels = []
+            for dn in day_nums:
+                dow = col1
+                try:
+                    if month_num:
+                        dow = _DOW[datetime.date(year_num, month_num, dn).weekday()]
+                except Exception:
+                    pass
+                label = f"{month_num}/{dn}({dow})"
+                cur_labels.append(label)
+                _get_or_create(label)
+
+            if col2:
+                for label in cur_labels:
+                    days[label]['lunch'].append(col2)
+            for c in range(3, n_cols):
+                v = clean_mat(cv(r, c))
+                if v:
+                    for label in cur_labels:
+                        days[label]['mats'].append(v)
+
+        elif col0 == '' and col1 == '' and cur_labels:
+            if col2:
+                for label in cur_labels:
+                    days[label]['lunch'].append(col2)
+            for c in range(3, n_cols):
+                v = clean_mat(cv(r, c))
+                if v:
+                    for label in cur_labels:
+                        days[label]['mats'].append(v)
+
+    lines = []
+    if year_num and month_num:
+        lines += [f"# 献立データ {year_num}年{month_num:02d}月", ""]
+
+    for label in sorted(day_order, key=lambda s: int(re.match(r'\d+/(\d+)', s).group(1))):
+        d = days[label]
+        if not d['lunch'] and not d['mats']:
+            continue
+        lines.append(f"【{label}】")
+        if d['lunch']:
+            lines.append(f"昼食: {' / '.join(d['lunch'])}")
+        if d['mats']:
+            lines.append(f"材料: {', '.join(d['mats'])}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
 def _excel_to_text_miyama(df):
     """美山保育園形式（月別シート・datetime日付・離乳食・おやつcol10）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
@@ -1327,6 +1527,10 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_yamazaki(df)
     if fmt == 'ayumi':
         return _excel_to_text_ayumi(df)
+    if fmt == 'kyomachibori':
+        return _excel_to_text_kyomachibori(df)
+    if fmt == 'sakae_baby':
+        return _excel_to_text_sakae_baby(df)
     if fmt == 'miyama':
         return _excel_to_text_miyama(df)
     if fmt == 'kunimi':
