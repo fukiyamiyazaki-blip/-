@@ -441,6 +441,25 @@ FRUIT_KW       = [
 ]
 
 
+def reverse_naming_check(kw_group, label, sorted_dates, lunch, snack, ing, day_ngs,
+                          min_others=2, ratio=0.85):
+    """「材料欄にはあるが献立名に記載がない」表記漏れを、ファイル内の運用パターンから判定する。
+    対象日own自身を母集団から除いた残りの日（leave-one-out）で「普段は献立名に明記する」
+    割合を求め、それが高い園に限って外れ値（記載漏れ）を報告する。
+    普段から献立名に書かない園（割合が低い園）では何も報告しない。
+    サンプルが少数（min_others未満）の場合は判定を保留する（自己参照による希釈を避けるため）。"""
+    material_days = [ds for ds in sorted_dates if any(k in ing(ds) for k in kw_group)]
+    named_days = {ds for ds in material_days if any(k in (lunch(ds) + ' ' + snack(ds)) for k in kw_group)}
+    for ds in material_days:
+        if ds in named_days:
+            continue
+        others = [d for d in material_days if d != ds]
+        if len(others) < min_others:
+            continue
+        if sum(d in named_days for d in others) / len(others) >= ratio:
+            day_ngs[ds].append(f'● 材料に「{label}」があるが献立名に記載がない（表記漏れの可能性）')
+
+
 def get_api_key():
     try:
         key = st.secrets.get("ANTHROPIC_API_KEY", "")
@@ -2535,6 +2554,12 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                 if any(g in ls_text for g in group) and not any(g in i_text for g in group):
                     day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（別の果物に違っていないか要確認）')
 
+        # ── 材料に果物があるのに献立名に記載がない（逆方向の表記漏れ）─────
+        # この園が普段「献立名に果物を明記する」運用かをファイル内で判定し、
+        # その運用が支配的な場合にだけ外れ値（記載漏れ）として報告する。
+        # （果物を普段から献立名に書かない園まで一律チェックすると誤検知だらけになるため）
+        reverse_naming_check(FRUIT_KW, '果物', sorted_dates, lunch, snack, ing, day_ngs)
+
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
@@ -2752,18 +2777,58 @@ def build_result_table(sorted_dates, entries, day_ngs):
     return '\n'.join(lines)
 
 
+_GROUNDING_PATTERNS = [
+    re.compile(r'材料(?:欄)?に(?:は)?(.+?)(?:が|は)?(?:一切)?(?:見当たらない|入っていない|ない|無い|なし)'),
+    re.compile(r'(.+?)(?:が|は)材料(?:欄)?に(?:は)?(?:一切)?(?:見当たらない|入っていない|ない|無い|なし)'),
+]
+
+
+def _ai_ng_is_grounded(reason, ingredients_text):
+    """AIの指摘文（「● ○○があるが材料に△△がない」等）が実際の材料欄と矛盾していないか検証する。
+    指摘文中の「材料に◯◯がない」（語順が逆のパターンも含む）の◯◯部分を取り出し、実際の材料欄に
+    それが存在するならAIの幻覚（見間違い）と判断してFalseを返す。文面から抽出できない場合は
+    保守的にTrue（採用）とする。"""
+    reason = reason.lstrip('●').strip()
+    for pat in _GROUNDING_PATTERNS:
+        m = pat.search(reason)
+        if not m:
+            continue
+        candidates = [c.strip('「」()（）　 ').strip() for c in re.split(r'[/・、,，]', m.group(1))]
+        candidates = [c for c in candidates if c]
+        if candidates:
+            return not any(c in ingredients_text for c in candidates)
+    return True
+
+
+def _canon_date_label(s):
+    """日付ラベルの表記ゆれ（全角括弧・余分な空白等）を吸収して比較用キーに正規化する。"""
+    m = re.search(r'(\d+)\s*/\s*(\d+)\s*[\(（]\s*([月火水木金土日])\s*[\)）]', s)
+    return f'{int(m.group(1))}/{int(m.group(2))}({m.group(3)})' if m else None
+
+
 def run_check(excel_text, rules_text, api_key, file_name, sheet_name, leftover_words=None):
     _, day_ngs = compute_all_python_ngs(excel_text, rules_text, leftover_words)
     year, month_num, sorted_dates, entries = _parse_structured(excel_text)
     if not sorted_dates:
         return "| 日付 | 献立名 | おやつ | 結果 |\n|------|--------|--------|------|"
 
+    canon_to_real = {}
+    for ds in day_ngs:
+        c = _canon_date_label(ds)
+        if c:
+            canon_to_real[c] = ds
+
     ai_ngs = _ai_name_ingredient_check(excel_text, api_key)
     for date_label, ngs in ai_ngs.items():
-        if date_label in day_ngs:
-            for ng in ngs:
-                if ng not in day_ngs[date_label]:
-                    day_ngs[date_label].append(ng)
+        real_ds = canon_to_real.get(_canon_date_label(date_label))
+        if real_ds is None:
+            continue  # Python側の日付と一致しないAI指摘（表記ゆれ等）は取り込まない
+        ingredients_text = entries.get(real_ds, {}).get('ingredients', '')
+        for ng in ngs:
+            if not _ai_ng_is_grounded(ng, ingredients_text):
+                continue  # 材料欄に実在するのにAIが「ない」と誤検知（幻覚）した指摘は採用しない
+            if ng not in day_ngs[real_ds]:
+                day_ngs[real_ds].append(ng)
 
     return build_result_table(sorted_dates, entries, day_ngs)
 
