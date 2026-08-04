@@ -2033,11 +2033,18 @@ def _apply_kunimi_print_layout(ws):
     #    高さに対しては控えめすぎて上下に不自然な余白が残ることがあるため、
     #    幅基準の縮小率を先に求め、その縮小率で高さもちょうど1ページに収まるよう
     #    行の高さ自体を伸縮させる）。
+    # 幅方向にどれだけ縮小が必要かは、Excelの列幅（文字単位）→ポイント換算に
+    # 近似誤差が伴い、自前で縮小率を決め打ちすると横方向がはみ出す恐れがある
+    # （実測で発生）。そのため縮小率自体はExcelの「幅・高さを1ページに収める」
+    # 機能（fitToWidth/fitToHeight、_apply_a4_landscape_fitで設定済み）に委ね、
+    # 確実にはみ出さないようにする。その上で、行の高さを「その概算縮小率で
+    # 高さもほぼ1ページ分になる」比率に事前調整しておくことで、幅基準と高さ基準の
+    # 縮小率の差を縮め、上下（または左右）に不自然な余白が残る問題を緩和する。
     MARGIN_PT = 14.0
     PAGE_W_PT, PAGE_H_PT = 841.89, 595.28  # A4横（297mm×210mm）をポイント換算
     printable_w = PAGE_W_PT - 2 * MARGIN_PT
     printable_h = PAGE_H_PT - 2 * MARGIN_PT
-    PT_PER_CHAR_UNIT = 5.0  # Excelの列幅（文字単位）→ポイントの近似換算係数
+    PT_PER_CHAR_UNIT = 5.0  # 列幅（文字単位）→ポイントの近似換算係数（あくまで目安）
 
     total_w_units = sum(
         (ws.column_dimensions[get_column_letter(c)].width
@@ -2045,18 +2052,15 @@ def _apply_kunimi_print_layout(ws):
          and ws.column_dimensions[get_column_letter(c)].width else 8.43)
         for c in range(1, max_col + 1)
     )
-    total_w_pt = total_w_units * PT_PER_CHAR_UNIT
-    if total_w_pt <= 0:
-        return
-    scale = printable_w / total_w_pt
+    total_w_pt_est = total_w_units * PT_PER_CHAR_UNIT
 
     total_h_pt = sum(
         (ws.row_dimensions[r].height if ws.row_dimensions[r].height else 15.0)
         for r in range(1, energy_row + 1)
         if not ws.row_dimensions[r].hidden
     )
-    if total_h_pt > 0:
-        target_h_pt = (printable_h / scale) * 0.98  # 2%は安全マージン
+    if total_w_pt_est > 0 and total_h_pt > 0:
+        target_h_pt = total_w_pt_est * (printable_h / printable_w)
         stretch = target_h_pt / total_h_pt
         for r in range(1, energy_row + 1):
             if ws.row_dimensions[r].hidden:
@@ -2068,10 +2072,6 @@ def _apply_kunimi_print_layout(ws):
         setattr(ws.page_margins, margin_attr, MARGIN_PT / 72)
     ws.page_margins.header = 0
     ws.page_margins.footer = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = False
-    ws.page_setup.fitToWidth = None
-    ws.page_setup.fitToHeight = None
-    ws.page_setup.scale = max(10, min(400, round(scale * 100 * 0.98)))  # 2%は安全マージン
 
 
 def create_colored_excel(uploaded_file, color_groups=None):
@@ -2445,6 +2445,7 @@ def apply_replacements_to_excel(uploaded_file, pairs):
                         ctx = dish_ctx.get((cell.row - 1, cell.column - 1), "")
                         cell.value = _replace(cell.value, ctx)
             if fmt == 'kunimi':
+                _apply_a4_landscape_fit(ws)
                 _apply_kunimi_print_layout(ws)
         bio = BytesIO()
         wb.save(bio)
