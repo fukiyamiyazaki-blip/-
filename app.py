@@ -3133,7 +3133,15 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         # この園が普段「献立名に果物を明記する」運用かをファイル内で判定し、
         # その運用が支配的な場合にだけ外れ値（記載漏れ）として報告する。
         # （果物を普段から献立名に書かない園まで一律チェックすると誤検知だらけになるため）
-        reverse_naming_check(FRUIT_KW, '果物', sorted_dates, lunch, snack, ing, day_ngs)
+        # 「フルーツヨーグルト」等、複数の果物をまとめた総称名（RECIPE_RULESで
+        # FRUIT_KWをそのまま必須材料とする料理名）の日は、個別の果物名を
+        # あえて書かない運用が正当なため、母集団・判定対象から除外する。
+        _fruit_generic_names = [kw for kw, req in RECIPE_RULES if req is FRUIT_KW]
+        _fruit_reverse_dates = [
+            ds for ds in sorted_dates
+            if not any(name in (lunch(ds) + ' ' + snack(ds)) for name in _fruit_generic_names)
+        ]
+        reverse_naming_check(FRUIT_KW, '果物', _fruit_reverse_dates, lunch, snack, ing, day_ngs)
 
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
