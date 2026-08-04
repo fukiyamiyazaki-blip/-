@@ -6,7 +6,6 @@ import urllib.request
 import urllib.error
 import streamlit as st
 import streamlit.components.v1 as components
-import anthropic
 import pandas as pd
 from io import BytesIO
 from pathlib import Path
@@ -439,6 +438,30 @@ FRUIT_KW       = [
     'もも', '桃', 'ぶどう', 'ブドウ', 'いちご', 'イチゴ', 'メロン', 'すいか',
     'スイカ', 'キウイ', 'なし', '梨', 'マンゴー', 'さくらんぼ',
 ]
+# 献立名の特定食材と材料欄の食い違い（表記ゆれ・別の食材へのすり替わり）を
+# 決定的に判定するための同義語グループ。ここに載っている語は「献立名にあれば
+# 材料欄にも（同義語のいずれかで）存在するはず」という前提で照合する。
+# 以前はAIの自由記述チェックに任せていたが、言い回し次第で幻覚（実在するのに
+# 「ない」と誤診断）を起こしていたため廃止し、この決定的グループ照合に一本化した。
+# 新しい食材で同種の指摘が出た場合は、ここにグループを追加するだけで対応できる。
+FOOD_SYNONYM_GROUPS = [
+    ['パイン', 'パイナップル'],
+    ['もも', '桃'],
+    ['いちご', 'イチゴ'],
+    ['ぶどう', 'ブドウ'],
+    ['すいか', 'スイカ'],
+    ['なし', '梨'],
+    ['みかん'],
+    ['りんご'],
+    ['バナナ'],
+    ['オレンジ', 'マーマレード'],  # 「オレンジ蒸しパン」等はマーマレードがあればOK
+    ['メロン'],
+    ['キウイ'],
+    ['マンゴー'],
+    ['さくらんぼ'],
+    ['チンゲン菜', '青梗菜'],
+    ['牛乳'],
+]
 
 
 def reverse_naming_check(kw_group, label, sorted_dates, lunch, snack, ing, day_ngs,
@@ -460,14 +483,30 @@ def reverse_naming_check(kw_group, label, sorted_dates, lunch, snack, ing, day_n
             day_ngs[ds].append(f'● 材料に「{label}」があるが献立名に記載がない（表記漏れの可能性）')
 
 
-def get_api_key():
-    try:
-        key = st.secrets.get("ANTHROPIC_API_KEY", "")
-        if key:
-            return key
-    except Exception:
-        pass
-    return ""
+def bare_item_forward_check(bare_kw, label, sorted_dates, lunch, snack, ing, day_ngs,
+                             min_others=2, ratio=0.85):
+    """「献立名に○○が単体の項目として出ているのに材料欄にない」を、
+    ファイル内の運用パターンから判定する（reverse_naming_checkと対称の考え方）。
+    「フルーツヨーグルト」のような複合料理名は対象外（常時必須のチェックは別途行う）。
+    対象日own自身を母集団から除いた残りの日（leave-one-out）で「普段は材料欄に明記する」
+    割合を求め、それが高い園に限って記載漏れを報告する。普段から単体提供時は材料欄に
+    書かない運用の園（割合が低い園）では何も報告しない。"""
+    def _bare_items(text):
+        return [re.sub(r'[（(].*?[）)]', '', i).strip() for i in text.split('/')]
+
+    bare_days = [
+        ds for ds in sorted_dates
+        if bare_kw in _bare_items(lunch(ds) + '/' + snack(ds))
+    ]
+    has_material_days = {ds for ds in bare_days if bare_kw in ing(ds)}
+    for ds in bare_days:
+        if ds in has_material_days:
+            continue
+        others = [d for d in bare_days if d != ds]
+        if len(others) < min_others:
+            continue
+        if sum(d in has_material_days for d in others) / len(others) >= ratio:
+            day_ngs[ds].append(f'● 「{label}」単体提供があるが材料に{label}なし（記載漏れの可能性）')
 
 
 def get_github_token():
@@ -578,6 +617,8 @@ def _detect_sheet_format(df):
         return 'sakae_baby'
     if '京町堀バンビ園' in all_text:  # 京町堀バンビ園形式（離乳食・Excelシリアル日付・おやつ単一列）
         return 'kyomachibori'
+    if '離乳食メニュー' in all_text:  # 富喜屋提供の離乳食テンプレート（ぴよ・ぴよ保育園、鴻池第二バンビ等・複数園で共通）
+        return 'tomikiya'
     if '初期には入りません' in all_text or 'おかゆが付きます' in all_text:
         return 'yumehana'
     if '初期・アレルギーには' in all_text:  # 歩学園バンビ形式（離乳食・datetime日付・おやつcol8-9）
@@ -1109,6 +1150,90 @@ def _excel_to_text_ayumi(df):
     return '\n'.join(lines)
 
 
+def _excel_to_text_tomikiya(df):
+    """富喜屋提供の離乳食テンプレート形式（ぴよ・ぴよ保育園、鴻池第二バンビ等・複数園共通）。
+    1日が複数行（主菜＋野菜スープ［＋果物］）に分かれ、日付はブロック先頭行のみ・
+    後続行は日付欄が空のまま材料が続く。ヘッダー行の「献立名」「おやつ」セル位置を
+    動的検出して材料欄の範囲を決める（列数が多少変わっても追従できる設計）。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    header_row = name_col = None
+    for r in range(n_rows):
+        for c in range(n_cols):
+            if cv(r, c) == '献立名':
+                header_row, name_col = r, c
+                break
+        if header_row is not None:
+            break
+    if header_row is None:
+        return ""
+
+    snack_col = n_cols
+    for c in range(n_cols):
+        if cv(header_row, c) == 'おやつ':
+            snack_col = c
+            break
+
+    date_col = 0
+    for c in range(n_cols):
+        if '日付' in cv(header_row, c):
+            date_col = c
+            break
+
+    mat_start, mat_end = name_col + 1, snack_col
+    _DOW = ['月', '火', '水', '木', '金', '土', '日']
+
+    day_entries = []
+    cur = None
+    for r in range(header_row + 1, n_rows):
+        date_raw = cv(r, date_col)
+        col1_raw = cv(r, 1) if n_cols > 1 else ""
+        if date_raw.startswith(('※', '*印')) or col1_raw.startswith(('※', '*印')):
+            break  # 注記・免責文・提供元表記の行に到達したら終了
+
+        dm = re.match(r'(\d{4})-(\d{2})-(\d{2})', date_raw)
+        name_v = cv(r, name_col)
+        mats_v = [cv(r, c) for c in range(mat_start, mat_end) if cv(r, c)]
+        snack_v = cv(r, snack_col) if snack_col < n_cols else ""
+
+        if dm:
+            y, mo, d = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
+            dow = _DOW[datetime.date(y, mo, d).weekday()]
+            cur = {'year': y, 'month': mo, 'day': d, 'dow': dow,
+                   'lunch': [], 'mats': [], 'snack': ''}
+            day_entries.append(cur)
+        elif cur is None or not (name_v or mats_v or snack_v):
+            continue  # 日付が確定する前、または内容のない行（週またぎの休園note等）は無視
+
+        if name_v:
+            cur['lunch'].append(name_v)
+        cur['mats'].extend(mats_v)
+        if snack_v and not cur['snack']:
+            cur['snack'] = snack_v
+
+    if not day_entries:
+        return ""
+
+    y0, mo0 = day_entries[0]['year'], day_entries[0]['month']
+    lines = [f"# 献立データ {y0}年{mo0:02d}月", ""]
+    for e in day_entries:
+        lines.append(f"【{e['month']}/{e['day']}({e['dow']})】")
+        if e['lunch']:
+            lines.append(f"昼食: {' / '.join(e['lunch'])}")
+        if e['snack']:
+            lines.append(f"おやつ: {e['snack']}")
+        if e['mats']:
+            lines.append(f"材料: {', '.join(e['mats'])}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _excel_to_text_kyomachibori(df):
     """京町堀バンビ園形式（離乳食・週別シート・Excelシリアル日付・おやつ単一列）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
@@ -1548,6 +1673,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_ayumi(df)
     if fmt == 'kyomachibori':
         return _excel_to_text_kyomachibori(df)
+    if fmt == 'tomikiya':
+        return _excel_to_text_tomikiya(df)
     if fmt == 'sakae_baby':
         return _excel_to_text_sakae_baby(df)
     if fmt == 'miyama':
@@ -1600,6 +1727,14 @@ def excel_to_text(uploaded_file, sheet_name):
                 break
         if year_month:
             break
+
+    # シート内のどこにも年月表記がない形式（宝塚自然幼稚園・若草幼稚園等）向けに、
+    # アップロードファイル名（例：「2026年9月　◯◯幼稚園様.xls」）からのフォールバック抽出。
+    if not year_month:
+        m = re.search(r'(\d{4})年(\d{1,2})月', uploaded_file.name)
+        if m:
+            year_month = f"{m.group(1)}年{int(m.group(2)):02d}月"
+            month_num = str(int(m.group(2)))
 
     skip_vals = {"[昼]", "[午後]", "献立名", "材料", "日付"}
 
@@ -2083,32 +2218,102 @@ def create_colored_excel(uploaded_file, color_groups=None):
     return bio
 
 
+def _kunimi_dish_context_map(df):
+    """くにみ子ども園形式限定：昼食の材料セル(row, col)→その日の昼食献立名テキスト、
+    の対応表を返す。条件付き置換ルール（例：「中華麺」は献立名がラーメンなら維持し、
+    皿うどん/ちゃんぽん/焼きそばなら置換）が、そのセルがどの日のどの献立の材料かを
+    判定するために使う。くにみ形式でなければ空dictを返す（＝条件付き置換は発火しない）。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    date_row, date_cols = None, {}
+    for r in range(n_rows):
+        temp = {c: cv(r, c) for c in range(n_cols) if re.match(r'^\d+日$', cv(r, c))}
+        if len(temp) >= 3:
+            date_row, date_cols = r, temp
+            break
+    if date_row is None:
+        return {}
+
+    header_rows = [r for r in range(date_row + 1, n_rows)
+                   if cv(r, 4) == '乳児' and cv(r, 5) == '幼児']
+    labeled_rows = sorted(r for r in range(date_row + 1, n_rows) if cv(r, 1))
+
+    meal_blocks = []  # (dish_row, mat_row) の昼食ブロックのみ
+    for r in range(date_row + 1, n_rows):
+        if cv(r, 1) == '昼食':
+            nxt_header = next((h for h in header_rows if h > r), None)
+            if nxt_header is not None:
+                meal_blocks.append((r, nxt_header))
+
+    context = {}
+    for col_c in date_cols:
+        for dish_row, mat_row in meal_blocks:
+            dish_text = ' '.join(
+                cv(r, col_c - 1) for r in range(dish_row, mat_row) if cv(r, col_c - 1)
+            )
+            block_end = next((lr for lr in labeled_rows if lr > mat_row), n_rows)
+            for r in range(mat_row + 1, block_end):
+                context[(r, col_c)] = dish_text
+    return context
+
+
 def apply_replacements_to_excel(uploaded_file, pairs):
     """
     アップロードされたExcelの全セルに対し、pairs の (from → to) を順に文字列置換して
-    新しい .xlsx を返す。列オフセット等を考慮しないフォーマット非依存の一律置換。
+    新しい .xlsx を返す。列オフセット等を考慮しないフォーマット非依存の一律置換が基本だが、
+    pairに"when_dish"/"unless_dish"（その日の昼食献立名に含む/含まないキーワードのリスト）
+    が指定されている場合は、くにみ子ども園形式に限り献立名の文脈を見て条件判定する
+    （それ以外の形式では条件付きpairは常にスキップ＝置換されない。無条件pairの動作は不変）。
     .xls はデータ・マージセル・列幅行高さ・罫線を再構築する（create_colored_excelと同様）。
-    pairs: [{"from": str, "to": str}, ...]
+    pairs: [{"from": str, "to": str, "when_dish": [str,...]?, "unless_dish": [str,...]?}, ...]
     """
     is_xls = uploaded_file.name.lower().endswith(".xls")
     file_bytes = uploaded_file.read()
+    has_conditional = any(p.get("when_dish") or p.get("unless_dish") for p in pairs)
 
-    def _replace(v):
+    def _replace(v, dish_text=""):
         s = str(v)
         for p in pairs:
-            if p.get("from"):
-                s = s.replace(p["from"], p.get("to", ""))
+            if not p.get("from"):
+                continue
+            when_dish = p.get("when_dish")
+            unless_dish = p.get("unless_dish")
+            if when_dish and not any(k in dish_text for k in when_dish):
+                continue
+            if unless_dish and any(k in dish_text for k in unless_dish):
+                continue
+            s = s.replace(p["from"], p.get("to", ""))
         return s
+
+    def _sheet_dish_context(sh_name, engine):
+        if not has_conditional:
+            return {}
+        try:
+            df = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
+                                header=None, dtype=str, engine=engine)
+        except Exception:
+            return {}
+        if _detect_sheet_format(df) != 'kunimi':
+            return {}
+        return _kunimi_dish_context_map(df)
 
     # ─── .xlsx ───────────────────────────────────────────────
     if not is_xls:
         wb = load_workbook(BytesIO(file_bytes))
         for sh_name in wb.sheetnames:
             ws = wb[sh_name]
+            dish_ctx = _sheet_dish_context(sh_name, "openpyxl")
             for row in ws.iter_rows():
                 for cell in row:
                     if isinstance(cell.value, str):
-                        cell.value = _replace(cell.value)
+                        ctx = dish_ctx.get((cell.row - 1, cell.column - 1), "")
+                        cell.value = _replace(cell.value, ctx)
         bio = BytesIO()
         wb.save(bio)
         bio.seek(0)
@@ -2137,6 +2342,8 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         else:
             ws = wb.create_sheet(title=sh_name[:31])
 
+        dish_ctx = _sheet_dish_context(sh_name, "xlrd")
+
         # 値をコピー（置換は文字列セルのみに適用。数値・日付セルは型を保持する）
         for r_i in range(n_rows):
             for c_i in range(n_cols):
@@ -2144,7 +2351,8 @@ def apply_replacements_to_excel(uploaded_file, pairs):
                 if v is None or str(v).strip() in ("nan", "", "None"):
                     continue
                 if xls_ws.cell_type(r_i, c_i) == _xlrd.XL_CELL_TEXT:
-                    ws.cell(row=r_i + 1, column=c_i + 1, value=_replace(str(v).strip()) or None)
+                    ctx = dish_ctx.get((r_i, c_i), "")
+                    ws.cell(row=r_i + 1, column=c_i + 1, value=_replace(str(v).strip(), ctx) or None)
                 else:
                     ws.cell(row=r_i + 1, column=c_i + 1, value=v)
 
@@ -2516,8 +2724,6 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('わかめ',           ['わかめ']),  # 「わかめスープ」「わかめご飯」等
             ('果物',             FRUIT_KW),
             ('フルーツヨーグルト', FRUIT_KW),
-            ('ヨーグルト',       ['ヨーグルト']),       # フルーツヨーグルト・桃ヨーグルト等すべて対象
-            ('お菓子',           ['お菓子']),
         ]
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
@@ -2528,31 +2734,34 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                         missing = '・'.join(required_any)
                         day_ngs[ds].append(f'● 「{kw}」があるが材料に{missing}なし')
 
-        # ── 献立名の果物名と材料の果物が一致しないチェック ────────
-        # （例：「パインパンケーキ」なのに材料が「みかん缶」など、別の果物に
-        #   すり替わっているケースを検出。表記ゆれ（パイン/パイナップル等）は同一視する）
-        FRUIT_GROUPS = [
-            ['パイン', 'パイナップル'],
-            ['もも', '桃'],
-            ['いちご', 'イチゴ'],
-            ['ぶどう', 'ブドウ'],
-            ['すいか', 'スイカ'],
-            ['なし', '梨'],
-            ['みかん'],
-            ['りんご'],
-            ['バナナ'],
-            ['オレンジ', 'マーマレード'],  # 「オレンジ蒸しパン」等はマーマレードがあればOK
-            ['メロン'],
-            ['キウイ'],
-            ['マンゴー'],
-            ['さくらんぼ'],
-        ]
+        # ── お菓子：市販品をそのまま提供するだけの園では材料欄に書かない運用がある
+        #     （富喜屋提供の離乳食テンプレート等で確認）。ヨーグルトと同じ考え方で、
+        #     園内の運用（leave-one-out）を見て判断する ─────
+        bare_item_forward_check('お菓子', 'お菓子', sorted_dates, lunch, snack, ing, day_ngs)
+
+        # ── ヨーグルト：複合料理名（フルーツヨーグルト・桃ヨーグルト等）は常時必須、
+        #     単体提供（おやつ等で「ヨーグルト」単独の項目として出る場合）は運用依存 ─────
+        # 園によっては単体提供時に材料欄へ記載しない運用がある（伊勢原立正幼稚園で確認）。
+        # 「ヨーグルト」を含む項目単体がその日の献立に複合名で出ていない場合は、
+        # bare_item_forward_check の園内運用判定（leave-one-out）に委ねる。
+        for ds in sorted_dates:
+            items = [re.sub(r'[（(].*?[）)]', '', i).strip()
+                     for i in (lunch(ds) + '/' + snack(ds)).split('/')]
+            if any('ヨーグルト' in i and i != 'ヨーグルト' for i in items) and 'ヨーグルト' not in ing(ds):
+                day_ngs[ds].append('● 「ヨーグルト」があるが材料にヨーグルトなし')
+        bare_item_forward_check('ヨーグルト', 'ヨーグルト', sorted_dates, lunch, snack, ing, day_ngs)
+
+        # ── 献立名の特定食材と材料が一致しないチェック ────────
+        # （例：「パインパンケーキ」なのに材料が「みかん缶」など、別の食材に
+        #   すり替わっているケースを検出。表記ゆれ（パイン/パイナップル、
+        #   チンゲン菜/青梗菜等）は同一視する。旧AI自由記述チェックの後継
+        #   ＝ここに載っている食材については、この決定的照合だけで完結する）
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
             i_text  = ing(ds)
-            for group in FRUIT_GROUPS:
+            for group in FOOD_SYNONYM_GROUPS:
                 if any(g in ls_text for g in group) and not any(g in i_text for g in group):
-                    day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（別の果物に違っていないか要確認）')
+                    day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（表記が違っていないか要確認）')
 
         # ── 材料に果物があるのに献立名に記載がない（逆方向の表記漏れ）─────
         # この園が普段「献立名に果物を明記する」運用かをファイル内で判定し、
@@ -2699,74 +2908,8 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     return '\n'.join(lines), day_ngs
 
 
-def _ai_name_ingredient_check(excel_text, api_key):
-    """
-    AIに「献立名と材料の照合チェック」のみを狭く依頼する。
-    表全体の書き写しはさせず、見つけた問題だけを1行1件で報告させることで、
-    LLMがPython確定NGを表に転記し損なう（行を落とす）リスクを排除する。
-    Returns: {date_label: [ng_str, ...]}
-    """
-    client = anthropic.Anthropic(api_key=api_key)
-    prompt = f"""あなたは幼稚園給食の献立チェック専門家です。
-以下のエクセルデータについて【献立名と材料の照合チェック】のみを行ってください。
-
-・同じ日の【献立名】に入っている食材が、その日の【材料】欄に見当たらない場合だけ報告する
-・それ以外のルール（連続使用・週次・月上限など）は一切チェックしないでください（別途計算済みのため対象外）
-
-例外（NG対象外）：
-・「ごはん」「おにぎり」→ 白米があればOK
-・「チキン」「鶏」→ 鶏肉があればOK
-・「すまし汁」「スープ」→ 食材なくてOK
-・「ゼリー」→ 食材なくてOK
-・「ごぼう」→ ささがきごぼうがあればOK
-・「オレンジ蒸しパン」などオレンジ風味の料理 → マーマレードがあればOK（オレンジ・みかんがなくても可）
-
-========================================
-# エクセルデータ
-========================================
-{excel_text}
-
-========================================
-# 出力形式（絶対厳守）
-========================================
-問題が見つかった日付だけ、1行に1件、次の形式で出力してください。
-問題が1件もなければ何も出力しないでください（前後の文章・説明・表組みは一切不要）。
-
-日付ラベル: ●理由
-
-・日付ラベルは上記データの【】内の表記（例：8/4(火)）をそのまま使うこと
-・「● ○○があるが材料に○○がない」のように具体的に書くこと
-・OKだった日や問題がない日については何も書かないこと
-"""
-    message = client.messages.create(
-        model="claude-opus-4-8",
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    raw = message.content[0].text
-
-    _NOT_REAL_NG = re.compile(
-        r'OK\s*$|実NG[無な]し|NG[無な]し|OK扱い|問題[無な]し|許容$|対象外\s*$|重複[無な]し'
-    )
-    ai_ngs = {}
-    for line in raw.split('\n'):
-        line = line.strip().lstrip('|').rstrip('|').strip()
-        m = re.match(r'^([^\s:：]+\([月火水木金土日]\))\s*[:：]\s*(.+)$', line)
-        if not m:
-            continue
-        date_label, reason = m.group(1), m.group(2).strip()
-        if not reason or _NOT_REAL_NG.search(reason):
-            continue
-        if not reason.startswith('●'):
-            reason = f'● {reason}'
-        ai_ngs.setdefault(date_label, []).append(reason)
-    return ai_ngs
-
-
 def build_result_table(sorted_dates, entries, day_ngs):
-    """day_ngs（Python確定NG＋AIのステップ4分をマージ済み）から最終結果テーブルを
-    Pythonで確定的に組み立てる。AIに表の書き写しをさせないため、Python確定NGが
-    行ごと欠落することがない。"""
+    """day_ngs（Python確定NG）から最終結果テーブルをPythonで確定的に組み立てる。"""
     lines = ['| 日付 | 献立名 | おやつ | 結果 |', '|------|--------|--------|------|']
     for ds in sorted_dates:
         lunch_text = entries[ds]['lunch']
@@ -2777,58 +2920,28 @@ def build_result_table(sorted_dates, entries, day_ngs):
     return '\n'.join(lines)
 
 
-_GROUNDING_PATTERNS = [
-    re.compile(r'材料(?:欄)?に(?:は)?(.+?)(?:が|は)?(?:一切)?(?:見当たらない|入っていない|ない|無い|なし)'),
-    re.compile(r'(.+?)(?:が|は)材料(?:欄)?に(?:は)?(?:一切)?(?:見当たらない|入っていない|ない|無い|なし)'),
-]
+def combine_result_tables(tables):
+    """複数シート分の結果テーブル（build_result_tableが返す同一ヘッダーの表）を
+    1つの表に結合する（月が「9.1」「9.16」のように複数シートへ分かれている形式向け）。"""
+    tables = [t for t in tables if t.strip()]
+    if not tables:
+        return "| 日付 | 献立名 | おやつ | 結果 |\n|------|--------|--------|------|"
+    lines = tables[0].split('\n')[:2]  # ヘッダー行＋区切り行
+    for t in tables:
+        lines.extend(row for row in t.split('\n')[2:] if row.strip())
+    return '\n'.join(lines)
 
 
-def _ai_ng_is_grounded(reason, ingredients_text):
-    """AIの指摘文（「● ○○があるが材料に△△がない」等）が実際の材料欄と矛盾していないか検証する。
-    指摘文中の「材料に◯◯がない」（語順が逆のパターンも含む）の◯◯部分を取り出し、実際の材料欄に
-    それが存在するならAIの幻覚（見間違い）と判断してFalseを返す。文面から抽出できない場合は
-    保守的にTrue（採用）とする。"""
-    reason = reason.lstrip('●').strip()
-    for pat in _GROUNDING_PATTERNS:
-        m = pat.search(reason)
-        if not m:
-            continue
-        candidates = [c.strip('「」()（）　 ').strip() for c in re.split(r'[/・、,，]', m.group(1))]
-        candidates = [c for c in candidates if c]
-        if candidates:
-            return not any(c in ingredients_text for c in candidates)
-    return True
-
-
-def _canon_date_label(s):
-    """日付ラベルの表記ゆれ（全角括弧・余分な空白等）を吸収して比較用キーに正規化する。"""
-    m = re.search(r'(\d+)\s*/\s*(\d+)\s*[\(（]\s*([月火水木金土日])\s*[\)）]', s)
-    return f'{int(m.group(1))}/{int(m.group(2))}({m.group(3)})' if m else None
-
-
-def run_check(excel_text, rules_text, api_key, file_name, sheet_name, leftover_words=None):
+def run_check(excel_text, rules_text, file_name, sheet_name, leftover_words=None):
+    """献立名⇔材料の照合を含む全チェックはPython側（compute_all_python_ngs）で決定的に行う。
+    以前はここでAIに自由記述で「材料にない」と判断させ事後検証していたが、AIの言い回し次第で
+    検証がすり抜ける幻覚（実在する食材を「ない」と誤診断）が繰り返し発生したため廃止した。
+    献立名⇔材料の食い違いはFOOD_SYNONYM_GROUPS（compute_all_python_ngs内）に決定的な
+    同義語グループとして追加していく方式に一本化している。"""
     _, day_ngs = compute_all_python_ngs(excel_text, rules_text, leftover_words)
     year, month_num, sorted_dates, entries = _parse_structured(excel_text)
     if not sorted_dates:
         return "| 日付 | 献立名 | おやつ | 結果 |\n|------|--------|--------|------|"
-
-    canon_to_real = {}
-    for ds in day_ngs:
-        c = _canon_date_label(ds)
-        if c:
-            canon_to_real[c] = ds
-
-    ai_ngs = _ai_name_ingredient_check(excel_text, api_key)
-    for date_label, ngs in ai_ngs.items():
-        real_ds = canon_to_real.get(_canon_date_label(date_label))
-        if real_ds is None:
-            continue  # Python側の日付と一致しないAI指摘（表記ゆれ等）は取り込まない
-        ingredients_text = entries.get(real_ds, {}).get('ingredients', '')
-        for ng in ngs:
-            if not _ai_ng_is_grounded(ng, ingredients_text):
-                continue  # 材料欄に実在するのにAIが「ない」と誤検知（幻覚）した指摘は採用しない
-            if ng not in day_ngs[real_ds]:
-                day_ngs[real_ds].append(ng)
 
     return build_result_table(sorted_dates, entries, day_ngs)
 
@@ -2845,10 +2958,6 @@ with st.sidebar:
 
 if page == "📋 献立チェック":
     st.title("📋 献立チェック")
-
-    api_key = get_api_key()
-    if not api_key:
-        st.error("⚠️ APIキーが設定されていません。管理者にお問い合わせください。")
 
     with st.expander("🔄 0. 置換Excel生成（任意・材料名の言い換え）", expanded=False):
         st.caption(
@@ -2898,7 +3007,15 @@ if page == "📋 献立チェック":
         sheets = get_sheet_names(uploaded)
         if sheets:
             st.markdown("### 2. シートを選択")
-            selected_sheet = st.selectbox("シート", sheets)
+            combine_all_sheets = False
+            if len(sheets) > 1:
+                combine_all_sheets = st.checkbox(
+                    "全シートをまとめてチェックする（月が複数シートに分かれている形式向け）",
+                    key="combine_all_sheets",
+                )
+            selected_sheet = st.selectbox(
+                "シート", sheets, disabled=combine_all_sheets,
+            )
 
             st.markdown("### 3. 使用するルールを選択")
             all_rules = load_rules_list()
@@ -2963,25 +3080,31 @@ if page == "📋 献立チェック":
                 )
 
             st.markdown("### 5. チェック開始")
-            if st.button("✅ チェックを開始する", type="primary", disabled=not api_key):
+            if st.button("✅ チェックを開始する", type="primary"):
                 rules = selected_rule_text
                 if not rules.strip():
                     st.error("ルールが選択されていないか空です。「ルール管理」ページでルールを設定してください。")
                 else:
-                    with st.spinner("Excelデータを読み込んでいます..."):
-                        uploaded.seek(0)
-                        excel_text = excel_to_text(uploaded, selected_sheet)
-
-                    with st.spinner("チェック中です。1〜2分ほどお待ちください..."):
+                    target_sheets = sheets if combine_all_sheets else [selected_sheet]
+                    with st.spinner("チェック中です..."):
                         try:
-                            uploaded.seek(0)
-                            result = run_check(
-                                excel_text, rules, api_key, uploaded.name, selected_sheet,
-                                leftover_words,
+                            results = []
+                            for sn in target_sheets:
+                                uploaded.seek(0)
+                                excel_text = excel_to_text(uploaded, sn)
+                                results.append(
+                                    run_check(excel_text, rules, uploaded.name, sn, leftover_words)
+                                )
+                            result = (
+                                combine_result_tables(results)
+                                if combine_all_sheets else results[0]
                             )
                             st.session_state["last_result"] = result
                             st.session_state["last_filename"] = uploaded.name
-                            st.session_state["last_sheet"] = selected_sheet
+                            st.session_state["last_sheet"] = (
+                                f"全シート（{', '.join(target_sheets)}）"
+                                if combine_all_sheets else selected_sheet
+                            )
                             st.session_state["last_rule_name"] = chosen_name
                         except Exception as e:
                             st.error(f"エラーが発生しました: {e}")
