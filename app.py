@@ -1238,8 +1238,12 @@ def _excel_to_text_tomikiya(df):
         if name_v:
             cur['lunch'].append(name_v)
         cur['mats'].extend(mats_v)
-        if snack_v and not cur['snack']:
-            cur['snack'] = snack_v
+        if snack_v:
+            if not cur['snack']:
+                cur['snack'] = snack_v
+            else:
+                # おやつ名の次行に、そのおやつの原材料が同じ列に入る形式（富喜屋テンプレート等）
+                cur['mats'].append(snack_v)
 
     if not day_entries:
         return ""
@@ -1841,7 +1845,7 @@ def excel_to_text(uploaded_file, sheet_name):
     return "\n".join(lines)
 
 
-def table_to_docx(markdown_text):
+def table_to_docx(markdown_text, title=None):
     from docx.oxml.ns import qn as _qn
 
     doc = Document()
@@ -1859,6 +1863,14 @@ def table_to_docx(markdown_text):
     if pgSz is not None:
         pgSz.set(_qn('w:orient'), 'portrait')
         pgSz.set(_qn('w:code'), '9')
+
+    # ページヘッダーにタイトルを設定（Wordの機能により2枚目以降にも自動で表示される）
+    if title:
+        header_para = section.header.paragraphs[0]
+        run = header_para.add_run(title)
+        run.font.size = Pt(9)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0x40, 0x40, 0x40)
 
     lines = markdown_text.strip().split('\n')
     table_lines = [
@@ -2871,7 +2883,7 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('から揚げ', ['片栗粉']),
             ('唐揚げ',   ['片栗粉']),
             ('照り焼き', ['みりん', '醤油']),
-            ('蒸しパン', ['ベーキングパウダー', 'BP', '重曹']),
+            ('蒸しパン', ['ベーキングパウダー', 'BP', 'B.P', '重曹']),
             ('味噌汁',           ['みそ', '味噌']),
             ('みそ汁',           ['みそ', '味噌']),
             ('わかめ',           ['わかめ']),  # 「わかめスープ」「わかめご飯」等
@@ -3273,7 +3285,7 @@ if page == "📋 献立チェック":
                 result_text = st.session_state["last_result"]
                 st.markdown(result_text)
                 fname = st.session_state.get("last_filename", "result").rsplit(".", 1)[0]
-                docx_data = table_to_docx(result_text)
+                docx_data = table_to_docx(result_text, title=f"チェック結果 ― {_fname_disp}　シート: {_sheet_disp}")
                 st.download_button(
                     "📥 結果をWordファイルで保存",
                     data=docx_data,
