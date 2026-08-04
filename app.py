@@ -634,9 +634,12 @@ def _detect_sheet_format(df):
     return 'default'
 
 
-def _extract_year_month(df):
+def _extract_year_month(df, fname=""):
     """先頭10行から年月を抽出。タイトルが右端の列にあるフォーマットもあるため
-    列は全て走査する（行のみ先頭10行に限定）。(year_int, month_int, label_str)"""
+    列は全て走査する（行のみ先頭10行に限定）。(year_int, month_int, label_str)
+    シート内に年月表記がない場合（月が複数シートに分かれ、2シート目以降には
+    タイトルを繰り返さない形式等）は、アップロードファイル名からのフォールバック
+    抽出を試みる（例：「2026年9月　◯◯こども園様.xls」）。"""
     n_rows, n_cols = df.shape
     for r in range(min(10, n_rows)):
         for c in range(n_cols):
@@ -645,10 +648,15 @@ def _extract_year_month(df):
             if m:
                 y, mo = int(m.group(1)), int(m.group(2))
                 return y, mo, f"{y}年{mo:02d}月"
+    if fname:
+        m = re.search(r'(\d{4})年(\d{1,2})月', fname)
+        if m:
+            y, mo = int(m.group(1)), int(m.group(2))
+            return y, mo, f"{y}年{mo:02d}月"
     return 0, 0, ""
 
 
-def _excel_to_text_sakae(df):
+def _excel_to_text_sakae(df, fname=""):
     """さかえ保育園形式（縦並び・4列材料）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
 
@@ -658,7 +666,7 @@ def _excel_to_text_sakae(df):
         v = str(df.iloc[r, c]).strip()
         return "" if v in ("nan", "", "None") else v
 
-    year_num, month_num, year_month = _extract_year_month(df)
+    year_num, month_num, year_month = _extract_year_month(df, fname)
 
     days = []
     cur = None
@@ -730,7 +738,7 @@ def _excel_to_text_sakae(df):
     return '\n'.join(lines)
 
 
-def _excel_to_text_omiya(df):
+def _excel_to_text_omiya(df, fname=""):
     """おおみやこども園形式（縦並び・1セル全材料）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
 
@@ -740,7 +748,7 @@ def _excel_to_text_omiya(df):
         v = str(df.iloc[r, c]).strip()
         return "" if v in ("nan", "", "None") else v
 
-    year_num, month_num, year_month = _extract_year_month(df)
+    year_num, month_num, year_month = _extract_year_month(df, fname)
 
     def clean_mat(text):
         text = re.sub(r'\(\d+g\)', '', text)         # 量(30g)を除去
@@ -795,7 +803,7 @@ def _excel_to_text_omiya(df):
     return '\n'.join(lines)
 
 
-def _excel_to_text_yumehana(df):
+def _excel_to_text_yumehana(df, fname=""):
     """ゆめのはなこども園形式（週別シート・Excelシリアル日付）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
 
@@ -808,7 +816,7 @@ def _excel_to_text_yumehana(df):
     def clean_mat(v):
         return v.replace('＊', '').replace('*', '').strip()
 
-    year_num, month_num, year_month = _extract_year_month(df)
+    year_num, month_num, year_month = _extract_year_month(df, fname)
 
     days = {}   # label → {'lunch', 'snack', 'mats'}
     day_order = []
@@ -945,7 +953,7 @@ def _excel_to_text_mebaenomori(df):
     return '\n'.join(lines)
 
 
-def _excel_to_text_yamazaki(df):
+def _excel_to_text_yamazaki(df, fname=""):
     """山崎幼稚園形式（横並び・2ブロック・3列/日・日付col_c/献立+材料col_c+1）→ 構造化テキスト"""
     n_rows, n_cols = df.shape
 
@@ -955,7 +963,7 @@ def _excel_to_text_yamazaki(df):
         v = str(df.iloc[r, c]).strip()
         return "" if v in ("nan", "", "None") else v
 
-    year_num, month_num, year_month = _extract_year_month(df)
+    year_num, month_num, year_month = _extract_year_month(df, fname)
 
     _SKIP = {"[昼]", "[午後]", "献立名", "材料", "材料表", "日付", "区分",
              "お箸もいります", "おはしもいります"}
@@ -1660,15 +1668,15 @@ def excel_to_text(uploaded_file, sheet_name):
     # フォーマット自動検出 → 専用パーサーに振り分け
     fmt = _detect_sheet_format(df)
     if fmt == 'sakae':
-        return _excel_to_text_sakae(df)
+        return _excel_to_text_sakae(df, uploaded_file.name)
     if fmt == 'omiya':
-        return _excel_to_text_omiya(df)
+        return _excel_to_text_omiya(df, uploaded_file.name)
     if fmt == 'mebaenomori':
         return _excel_to_text_mebaenomori(df)
     if fmt == 'yumehana':
-        return _excel_to_text_yumehana(df)
+        return _excel_to_text_yumehana(df, uploaded_file.name)
     if fmt == 'yamazaki':
-        return _excel_to_text_yamazaki(df)
+        return _excel_to_text_yamazaki(df, uploaded_file.name)
     if fmt == 'ayumi':
         return _excel_to_text_ayumi(df)
     if fmt == 'kyomachibori':
