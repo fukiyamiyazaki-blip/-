@@ -1955,6 +1955,18 @@ def _xls_print_area_range(xls_book, sheet_index):
     return None
 
 
+def _apply_a4_landscape_fit(ws):
+    """印刷設定をA4横・幅1ページに収まるよう明示的に設定する。
+    xlrdは用紙の向き・拡大縮小率（SETUPレコード）を読み取れないため、元ファイルの
+    設定を複製することはできない。その代わりA4横向き・横幅1ページに固定することで、
+    献立表（横に日付が並ぶ横長レイアウト）が常にきれいに1ページ幅で印刷できるようにする。"""
+    ws.page_setup.orientation = 'landscape'
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
 def create_colored_excel(uploaded_file, color_groups=None):
     """
     全シートを色付きにして .xlsx で返す。フォーマット自動検出により
@@ -2200,6 +2212,7 @@ def create_colored_excel(uploaded_file, color_groups=None):
             print_range = _xls_print_area_range(xls_wb, xls_wb.sheet_names().index(sh_name))
             if print_range:
                 ws.print_area = print_range
+            _apply_a4_landscape_fit(ws)
 
             # フォーマット検出
             df_sh = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
@@ -2432,6 +2445,7 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         print_range = _xls_print_area_range(xls_wb, xls_wb.sheet_names().index(sh_name))
         if print_range:
             ws.print_area = print_range
+        _apply_a4_landscape_fit(ws)
 
     bio = BytesIO()
     wb.save(bio)
@@ -2928,16 +2942,15 @@ def build_result_table(sorted_dates, entries, day_ngs):
     return '\n'.join(lines)
 
 
-def combine_result_tables(tables):
-    """複数シート分の結果テーブル（build_result_tableが返す同一ヘッダーの表）を
-    1つの表に結合する（月が「9.1」「9.16」のように複数シートへ分かれている形式向け）。"""
-    tables = [t for t in tables if t.strip()]
-    if not tables:
-        return "| 日付 | 献立名 | おやつ | 結果 |\n|------|--------|--------|------|"
-    lines = tables[0].split('\n')[:2]  # ヘッダー行＋区切り行
-    for t in tables:
-        lines.extend(row for row in t.split('\n')[2:] if row.strip())
-    return '\n'.join(lines)
+def combine_excel_texts(texts):
+    """複数シート分のexcel_text（1つの月が複数シートへ分かれている形式向け）を
+    チェック実行前に1本のテキストへ結合する。
+    週次・月次チェック（今月◯◯必須、週1回必須 等）はcompute_all_python_ngsが
+    sorted_dates全体を見て判定するため、シートごとに個別実行して後から結果表だけ
+    結合すると、月の折り返し地点で「まだ月内に1回も出てきていない」という
+    誤判定（本来は他方のシート側で既に登場している）が起きる。
+    必ずこの関数で結合したexcel_textを使って run_check を1回だけ呼ぶこと。"""
+    return '\n'.join(t for t in texts if t.strip())
 
 
 def run_check(excel_text, rules_text, file_name, sheet_name, leftover_words=None):
@@ -3096,16 +3109,16 @@ if page == "📋 献立チェック":
                     target_sheets = sheets if combine_all_sheets else [selected_sheet]
                     with st.spinner("チェック中です..."):
                         try:
-                            results = []
+                            excel_texts = []
                             for sn in target_sheets:
                                 uploaded.seek(0)
-                                excel_text = excel_to_text(uploaded, sn)
-                                results.append(
-                                    run_check(excel_text, rules, uploaded.name, sn, leftover_words)
-                                )
-                            result = (
-                                combine_result_tables(results)
-                                if combine_all_sheets else results[0]
+                                excel_texts.append(excel_to_text(uploaded, sn))
+                            # 週次・月次チェックが月全体を通して正しく判定されるよう、
+                            # シートごとに個別実行せず、結合後のテキストで1回だけ実行する
+                            combined_text = combine_excel_texts(excel_texts)
+                            result = run_check(
+                                combined_text, rules, uploaded.name,
+                                '/'.join(target_sheets), leftover_words,
                             )
                             st.session_state["last_result"] = result
                             st.session_state["last_filename"] = uploaded.name
