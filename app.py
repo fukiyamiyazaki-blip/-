@@ -1956,15 +1956,77 @@ def _xls_print_area_range(xls_book, sheet_index):
 
 
 def _apply_a4_landscape_fit(ws):
-    """印刷設定をA4横・幅1ページに収まるよう明示的に設定する。
+    """印刷設定をA4横・1ページに収まるよう明示的に設定する。
     xlrdは用紙の向き・拡大縮小率（SETUPレコード）を読み取れないため、元ファイルの
-    設定を複製することはできない。その代わりA4横向き・横幅1ページに固定することで、
-    献立表（横に日付が並ぶ横長レイアウト）が常にきれいに1ページ幅で印刷できるようにする。"""
+    設定を複製することはできない。その代わりA4横向き・縦横1ページに固定することで、
+    献立表（横に日付が並ぶ横長レイアウト）が常にきれいに1ページへ収まるようにする。"""
     ws.page_setup.orientation = 'landscape'
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
     ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
+    ws.page_setup.fitToHeight = 1
     ws.sheet_properties.pageSetUpPr.fitToPage = True
+
+
+def _apply_kunimi_print_layout(ws):
+    """くにみ子ども園形式限定：印刷用にA4横1枚へ収まるようレイアウトを調整する。
+    「エネルギー」行（栄養価サマリーの先頭）の位置は献立内容によって月ごとに
+    変わるため、固定行番号は使わずすべて実データから動的に検出する。
+    くにみ形式でない（日付行や午前/昼食/午後/エネルギーの見出しが見当たらない）
+    場合は何もしない（安全側）。"""
+    max_row, max_col = ws.max_row, ws.max_column
+
+    def cv(r, c):
+        v = ws.cell(row=r, column=c).value
+        v = "" if v is None else str(v).strip()
+        return "" if v in ("nan", "None") else v
+
+    # 日付行検出（「N日」パターンが3個以上ある行）
+    date_row, date_cols = None, []
+    for r in range(1, max_row + 1):
+        cols = [c for c in range(1, max_col + 1) if re.match(r'^\d+日$', cv(r, c))]
+        if len(cols) >= 3:
+            date_row, date_cols = r, cols
+            break
+    if date_row is None:
+        return
+
+    labeled_rows = sorted(r for r in range(date_row + 1, max_row + 1) if cv(r, 2))
+    meal_label_rows = [r for r in labeled_rows if cv(r, 2) in ('午前', '昼食', '午後')]
+    energy_row = next((r for r in labeled_rows if cv(r, 2) == 'エネルギー'), None)
+    if not meal_label_rows or energy_row is None:
+        return
+
+    # 1. 乳児/幼児グラム列（日付列の直後2列）の幅を広げる（###表示防止）
+    for c in date_cols:
+        for gc in (c + 1, c + 2):
+            if gc <= max_col:
+                ws.column_dimensions[get_column_letter(gc)].width = 5.5
+
+    # 2. 区分ラベル（午前/昼食/午後）セルを改行入り・中央揃え・折り返し表示に
+    #    （既存の縦結合はそのまま。幅が狭い列でも1文字ずつ改行されて読めるようにする）
+    for label_row in meal_label_rows:
+        label = cv(label_row, 2)
+        cell = ws.cell(row=label_row, column=2)
+        cell.value = '\n'.join(label)
+        cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+
+    # 3. 空行を非表示。区分ラベル列（2列目）の縦結合はラベルのある行に文字があるため
+    #    自然に保護される（結合先頭行は非空判定になり隠されない）。それ以外の列で
+    #    複数行にまたがる結合がある場合のみ、崩れないよう対象行を保護する。
+    protected_rows = set()
+    for merged_range in ws.merged_cells.ranges:
+        if merged_range.min_col == 2 and merged_range.max_col == 2:
+            continue
+        if merged_range.max_row - merged_range.min_row >= 1:
+            protected_rows.update(range(merged_range.min_row, merged_range.max_row + 1))
+    for r in range(date_row + 1, energy_row):
+        if r in protected_rows:
+            continue
+        if all(cv(r, c) == "" for c in range(1, max_col + 1)):
+            ws.row_dimensions[r].hidden = True
+
+    # 4. 印刷範囲を「A1〜エネルギー行」に設定（栄養素の内訳行は印刷対象外）
+    ws.print_area = f'A1:{get_column_letter(max_col)}{energy_row}'
 
 
 def create_colored_excel(uploaded_file, color_groups=None):
@@ -2312,15 +2374,16 @@ def apply_replacements_to_excel(uploaded_file, pairs):
             s = s.replace(p["from"], p.get("to", ""))
         return s
 
-    def _sheet_dish_context(sh_name, engine):
-        if not has_conditional:
-            return {}
+    def _sheet_format(sh_name, engine):
         try:
             df = pd.read_excel(BytesIO(file_bytes), sheet_name=sh_name,
                                 header=None, dtype=str, engine=engine)
         except Exception:
-            return {}
-        if _detect_sheet_format(df) != 'kunimi':
+            return None, None
+        return _detect_sheet_format(df), df
+
+    def _sheet_dish_context(fmt, df):
+        if not has_conditional or fmt != 'kunimi' or df is None:
             return {}
         return _kunimi_dish_context_map(df)
 
@@ -2329,12 +2392,15 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         wb = load_workbook(BytesIO(file_bytes))
         for sh_name in wb.sheetnames:
             ws = wb[sh_name]
-            dish_ctx = _sheet_dish_context(sh_name, "openpyxl")
+            fmt, df = _sheet_format(sh_name, "openpyxl")
+            dish_ctx = _sheet_dish_context(fmt, df)
             for row in ws.iter_rows():
                 for cell in row:
                     if isinstance(cell.value, str):
                         ctx = dish_ctx.get((cell.row - 1, cell.column - 1), "")
                         cell.value = _replace(cell.value, ctx)
+            if fmt == 'kunimi':
+                _apply_kunimi_print_layout(ws)
         bio = BytesIO()
         wb.save(bio)
         bio.seek(0)
@@ -2363,7 +2429,8 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         else:
             ws = wb.create_sheet(title=sh_name[:31])
 
-        dish_ctx = _sheet_dish_context(sh_name, "xlrd")
+        fmt, _df = _sheet_format(sh_name, "xlrd")
+        dish_ctx = _sheet_dish_context(fmt, _df)
 
         # 値をコピー（置換は文字列セルのみに適用。数値・日付セルは型を保持する）
         for r_i in range(n_rows):
@@ -2446,6 +2513,8 @@ def apply_replacements_to_excel(uploaded_file, pairs):
         if print_range:
             ws.print_area = print_range
         _apply_a4_landscape_fit(ws)
+        if fmt == 'kunimi':
+            _apply_kunimi_print_layout(ws)
 
     bio = BytesIO()
     wb.save(bio)
