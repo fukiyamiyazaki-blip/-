@@ -395,7 +395,7 @@ def _parse_structured(excel_text):
 # 2日連続チェック免除（完全一致）
 _EXEMPT_EXACT = {
     '白米', '七分付き米', 'しょうが', '生姜', 'にんにく', 'みそ', '味噌', '酢', '白ごま',
-    '人参', '玉ねぎ', '鶏肉', '豚肉', '牛肉', 'ひき肉',
+    '人参', '玉ねぎ', '鶏肉', '豚肉', '牛肉', 'ひき肉', '牛乳',
     '昆布', 'かつお',  # 天然だし(かつお・昆布) をカッコ分割した際の破片を免除
     '昆布出し',  # 毎日使用OK（漢字表記のため'だし'部分一致に引っかからないため明示）
 }
@@ -609,6 +609,12 @@ def _detect_sheet_format(df):
     all_text = ' '.join(str(v) for v in df.values.flatten() if pd.notna(v))
     if '熱と力になるもの' in all_text:
         return 'sakae'
+    # 北野田こども園様形式（サイクル献立）：'材料名'+'献立名'（omiya）や'離乳食メニュー'
+    # （tomikiya）の一般判定より先に、学校名で確実に判定する
+    if '北野田こども園' in all_text and '離乳食メニュー' in all_text:
+        return 'kitanoda_baby'
+    if '北野田こども園' in all_text:
+        return 'kitanoda'
     if '◎は10時おやつ' in all_text or ('材料名' in all_text and '献立名' in all_text):
         return 'omiya'
     if 'つかみ食べ練習用野菜' in all_text:  # 美山保育園形式（月別シート・datetime日付・おやつcol10）
@@ -1560,6 +1566,195 @@ def _excel_to_text_miyama(df):
     return '\n'.join(lines)
 
 
+def _clean_kitanoda_mats(raw):
+    """'／'・'、'区切りが混在する材料セルをトークンに分割し ', ' 区切りに統一。"""
+    parts = re.split(r'[、／]+', raw)
+    return ', '.join(p.strip() for p in parts if p.strip())
+
+
+def _excel_to_text_kitanoda(df, fname=""):
+    """北野田こども園様形式（幼児・サイクル献立）→ 構造化テキスト。
+    1つの献立ブロックが4行（エネルギー/たんぱく質/脂質/食物繊維の各行）で構成され、
+    同じ献立を使う日付（例：01日・15日・29日）は各行の日付欄に列挙される。
+    材料は1セルに「／」区切りでまとめて入る（献立名の品数＋おやつの品数ぶんのグループ）。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    year_num, month_num, year_month = _extract_year_month(df, fname)
+
+    header_row = None
+    for r in range(n_rows):
+        if cv(r, 1) == '献立名':
+            header_row = r
+            break
+    if header_row is None:
+        return ""
+
+    snack_col = 5 if n_cols > 5 else None
+    for c in range(n_cols):
+        if 'おやつ' in cv(header_row, c):
+            snack_col = c
+            break
+
+    _DOW_SET = set('月火水木金土日')
+    _DOW_ORDER = ['月', '火', '水', '木', '金', '土', '日']
+    _DATE_RE = re.compile(r'^(\d{1,2})(\.0)?$')
+
+    blocks = []
+    r = header_row + 1
+    while r < n_rows:
+        col0 = cv(r, 0)
+        if col0.startswith(('※', '◎')):
+            break
+        dm = _DATE_RE.match(col0)
+        name_v = cv(r, 1)
+        if not (dm and name_v):
+            r += 1
+            continue
+
+        dates = [int(dm.group(1))]
+        dow = None
+        for rr in range(r + 1, min(r + 4, n_rows)):
+            c0 = cv(rr, 0)
+            if c0 in _DOW_SET:
+                dow = c0
+            else:
+                dm2 = _DATE_RE.match(c0)
+                if dm2:
+                    dates.append(int(dm2.group(1)))
+
+        blocks.append({
+            'dates': dates, 'dow': dow,
+            'lunch': name_v,
+            'snack': cv(r, snack_col) if snack_col is not None else "",
+            'mats': cv(r, 2),
+        })
+        r += 4
+
+    if not blocks:
+        return ""
+
+    lines = []
+    if year_month:
+        lines += [f"# 献立データ {year_month}", ""]
+
+    mats_cache = {}
+    for e in blocks:
+        mats_disp = mats_cache.get(e['mats'])
+        if mats_disp is None:
+            mats_disp = _clean_kitanoda_mats(e['mats'])
+            mats_cache[e['mats']] = mats_disp
+        lunch_disp = e['lunch'].replace(',', ' / ')
+        snack_disp = e['snack'].replace(',', ' / ') if e['snack'] else ""
+
+        for d in e['dates']:
+            dow = e['dow']
+            if not dow and year_num and month_num:
+                try:
+                    dow = _DOW_ORDER[datetime.date(year_num, month_num, d).weekday()]
+                except Exception:
+                    dow = '?'
+            dow = dow or '?'
+            label = f"{month_num}/{d}({dow})" if month_num else f"?/{d}({dow})"
+            lines.append(f"【{label}】")
+            lines.append(f"昼食: {lunch_disp}")
+            if snack_disp:
+                lines.append(f"おやつ: {snack_disp}")
+            if mats_disp:
+                lines.append(f"材料: {mats_disp}")
+            lines.append("")
+
+    return '\n'.join(lines)
+
+
+def _excel_to_text_kitanoda_baby(df, fname=""):
+    """北野田こども園様形式（離乳食・サイクル献立）→ 構造化テキスト。
+    1日2行構成（1行目：日付Excelシリアル値＋主菜＋材料3列＋おやつ、
+    2行目：副菜＋材料3列）。おやつ欄はセル内改行で「おやつ名\\n（材料）」の
+    形式になっているため、名前と材料を分離して扱う。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    header_row = None
+    for r in range(n_rows):
+        if cv(r, 0) == '月日':
+            header_row = r
+            break
+    if header_row is None:
+        return ""
+
+    _DOW = ['月', '火', '水', '木', '金', '土', '日']
+    _SERIAL_RE = re.compile(r'^(\d{5})(\.0)?$')
+
+    day_entries = []
+    cur = None
+    for r in range(header_row + 1, n_rows):
+        col0 = cv(r, 0)
+        if col0.startswith(('*印', '◎')):
+            break
+
+        # 日付欄は「YYYY-MM-DD...」の日付文字列と、書式が数値のままの
+        # Excelシリアル値の両方があり得るため両方に対応する
+        ymd_m = re.match(r'(\d{4})-(\d{2})-(\d{2})', col0)
+        serial_m = None if ymd_m else _SERIAL_RE.match(col0)
+        name_v = cv(r, 1)
+        mats_v = [cv(r, c) for c in (2, 3, 4) if cv(r, c)]
+        snack_cell = cv(r, 5) if n_cols > 5 else ""
+
+        if ymd_m:
+            y, mo, d = int(ymd_m.group(1)), int(ymd_m.group(2)), int(ymd_m.group(3))
+            cur = {'year': y, 'month': mo, 'day': d,
+                   'dow': _DOW[datetime.date(y, mo, d).weekday()],
+                   'lunch': [], 'mats': [], 'snack': ''}
+            day_entries.append(cur)
+        elif serial_m:
+            dt = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(serial_m.group(1)))
+            cur = {'year': dt.year, 'month': dt.month, 'day': dt.day,
+                   'dow': _DOW[dt.weekday()], 'lunch': [], 'mats': [], 'snack': ''}
+            day_entries.append(cur)
+        elif cur is None or not (name_v or mats_v or snack_cell):
+            continue
+
+        if name_v:
+            cur['lunch'].append(name_v)
+        cur['mats'].extend(mats_v)
+        if snack_cell and not cur['snack']:
+            snack_lines = snack_cell.split('\n')
+            cur['snack'] = snack_lines[0].strip()
+            if len(snack_lines) > 1:
+                snack_ing = ' '.join(snack_lines[1:])
+                snack_ing = snack_ing.replace('（', '').replace('）', '').strip()
+                if snack_ing:
+                    cur['mats'].append(snack_ing)
+
+    if not day_entries:
+        return ""
+
+    y0, mo0 = day_entries[0]['year'], day_entries[0]['month']
+    lines = [f"# 献立データ {y0}年{mo0:02d}月", ""]
+    for e in day_entries:
+        lines.append(f"【{e['month']}/{e['day']}({e['dow']})】")
+        if e['lunch']:
+            lines.append(f"昼食: {' / '.join(e['lunch'])}")
+        if e['snack']:
+            lines.append(f"おやつ: {e['snack']}")
+        if e['mats']:
+            lines.append(f"材料: {', '.join(e['mats'])}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _excel_to_text_kunimi(df):
     """
     くにみ子ども園形式（横並び・4列/日・午前/昼食/午後の3食区分・乳児幼児2分量）
@@ -1709,6 +1904,10 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_miyama(df)
     if fmt == 'kunimi':
         return _excel_to_text_kunimi(df)
+    if fmt == 'kitanoda':
+        return _excel_to_text_kitanoda(df, uploaded_file.name)
+    if fmt == 'kitanoda_baby':
+        return _excel_to_text_kitanoda_baby(df, uploaded_file.name)
 
     n_rows, n_cols = df.shape
 
@@ -2686,7 +2885,9 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         for seasoning in SEASONING_2DAY:
             for i in range(1, len(sorted_dates)):
                 ds_c, ds_p = sorted_dates[i], sorted_dates[i-1]
-                if seasoning in ing(ds_c) and seasoning in ing(ds_p):
+                # 完全一致トークンで判定（部分一致だと「オイスターソース」等の
+                # 複合語が汎用の「ソース」と誤って一致してしまうため）
+                if seasoning in _split_ing(ing(ds_c)) and seasoning in _split_ing(ing(ds_p)):
                     d_c, d_p = _parse_date(ds_c, year), _parse_date(ds_p, year)
                     exempted = False
                     if d_c and d_p:
