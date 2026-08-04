@@ -1196,6 +1196,8 @@ def _excel_to_text_tomikiya(df):
 
     mat_start, mat_end = name_col + 1, snack_col
     _DOW = ['月', '火', '水', '木', '金', '土', '日']
+    _NOTE = ('初期', '完了期', 'お菓子は', '株式会社', '主食は', 'アレルギー',
+             '離乳食は', '大きさ等', '普通食を刻んで')
 
     day_entries = []
     cur = None
@@ -1205,7 +1207,12 @@ def _excel_to_text_tomikiya(df):
         if date_raw.startswith(('※', '*印')) or col1_raw.startswith(('※', '*印')):
             break  # 注記・免責文・提供元表記の行に到達したら終了
 
+        row_text = ' '.join(cv(r, c) for c in range(n_cols))
+        if any(n in row_text for n in _NOTE):
+            continue  # 注記・免責文・提供元表記の行（日付欄の外側に出現するケース）は無視
+
         dm = re.match(r'(\d{4})-(\d{2})-(\d{2})', date_raw)
+        serial_m = None if dm else re.match(r'^(\d{5})(\.0)?$', date_raw)
         name_v = cv(r, name_col)
         mats_v = [cv(r, c) for c in range(mat_start, mat_end) if cv(r, c)]
         snack_v = cv(r, snack_col) if snack_col < n_cols else ""
@@ -1213,6 +1220,13 @@ def _excel_to_text_tomikiya(df):
         if dm:
             y, mo, d = int(dm.group(1)), int(dm.group(2)), int(dm.group(3))
             dow = _DOW[datetime.date(y, mo, d).weekday()]
+            cur = {'year': y, 'month': mo, 'day': d, 'dow': dow,
+                   'lunch': [], 'mats': [], 'snack': ''}
+            day_entries.append(cur)
+        elif serial_m:
+            # 日付欄がExcelシリアル番号（未整形の数値）で入っている書式に対応
+            dt = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(serial_m.group(1)))
+            y, mo, d, dow = dt.year, dt.month, dt.day, _DOW[dt.weekday()]
             cur = {'year': y, 'month': mo, 'day': d, 'dow': dow,
                    'lunch': [], 'mats': [], 'snack': ''}
             day_entries.append(cur)
@@ -2856,8 +2870,8 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('唐揚げ',   ['片栗粉']),
             ('照り焼き', ['みりん', '醤油']),
             ('蒸しパン', ['ベーキングパウダー', 'BP', '重曹']),
-            ('味噌汁',           ['みそ']),
-            ('みそ汁',           ['みそ']),
+            ('味噌汁',           ['みそ', '味噌']),
+            ('みそ汁',           ['みそ', '味噌']),
             ('わかめ',           ['わかめ']),  # 「わかめスープ」「わかめご飯」等
             ('果物',             FRUIT_KW),
             ('フルーツヨーグルト', FRUIT_KW),
@@ -2909,7 +2923,7 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
-            if ('おすまし' in ls_text or 'おすいもの' in ls_text) and 'みそ' in ing(ds):
+            if ('おすまし' in ls_text or 'おすいもの' in ls_text) and ('みそ' in ing(ds) or '味噌' in ing(ds)):
                 day_ngs[ds].append('● 「おすまし/おすいもの」があるが材料に「みそ」あり（不要）')
 
         # ── 料理名に含まれない魚が材料にあるチェック ────────────────
