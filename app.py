@@ -2010,15 +2010,15 @@ def _apply_kunimi_print_layout(ws):
         cell.value = '\n'.join(label)
         cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
 
-    # 3. 空行を非表示。区分ラベル列（2列目）の縦結合はラベルのある行に文字があるため
-    #    自然に保護される（結合先頭行は非空判定になり隠されない）。それ以外の列で
-    #    複数行にまたがる結合がある場合のみ、崩れないよう対象行を保護する。
+    # 3. 空行を非表示。ただし複数列にまたがる結合セルが1つでもある行は、その月の
+    #    献立内容によっては空欄なだけの「予備の材料行」である可能性があるため隠さない
+    #    （区分ラベル列＝2列目だけの縦結合は対象外。ラベルのある行に文字があるため
+    #    自然に保護されており、そこだけを理由に他の行を保護する必要はない）。
     protected_rows = set()
     for merged_range in ws.merged_cells.ranges:
-        if merged_range.min_col == 2 and merged_range.max_col == 2:
-            continue
-        if merged_range.max_row - merged_range.min_row >= 1:
-            protected_rows.update(range(merged_range.min_row, merged_range.max_row + 1))
+        if merged_range.max_col - merged_range.min_col < 1:
+            continue  # 1列だけの結合（区分ラベル列の縦結合）は対象外
+        protected_rows.update(range(merged_range.min_row, merged_range.max_row + 1))
     for r in range(date_row + 1, energy_row):
         if r in protected_rows:
             continue
@@ -2027,6 +2027,51 @@ def _apply_kunimi_print_layout(ws):
 
     # 4. 印刷範囲を「A1〜エネルギー行」に設定（栄養素の内訳行は印刷対象外）
     ws.print_area = f'A1:{get_column_letter(max_col)}{energy_row}'
+
+    # 5. A4横1枚に上下左右の余白なく収まるよう、固定の縮小率＋行高さのスケーリングで
+    #    調整する（fitToWidth/fitToHeightの自動計算に任せると、幅基準の縮小率が
+    #    高さに対しては控えめすぎて上下に不自然な余白が残ることがあるため、
+    #    幅基準の縮小率を先に求め、その縮小率で高さもちょうど1ページに収まるよう
+    #    行の高さ自体を伸縮させる）。
+    MARGIN_PT = 14.0
+    PAGE_W_PT, PAGE_H_PT = 841.89, 595.28  # A4横（297mm×210mm）をポイント換算
+    printable_w = PAGE_W_PT - 2 * MARGIN_PT
+    printable_h = PAGE_H_PT - 2 * MARGIN_PT
+    PT_PER_CHAR_UNIT = 5.0  # Excelの列幅（文字単位）→ポイントの近似換算係数
+
+    total_w_units = sum(
+        (ws.column_dimensions[get_column_letter(c)].width
+         if get_column_letter(c) in ws.column_dimensions
+         and ws.column_dimensions[get_column_letter(c)].width else 8.43)
+        for c in range(1, max_col + 1)
+    )
+    total_w_pt = total_w_units * PT_PER_CHAR_UNIT
+    if total_w_pt <= 0:
+        return
+    scale = printable_w / total_w_pt
+
+    total_h_pt = sum(
+        (ws.row_dimensions[r].height if ws.row_dimensions[r].height else 15.0)
+        for r in range(1, energy_row + 1)
+        if not ws.row_dimensions[r].hidden
+    )
+    if total_h_pt > 0:
+        target_h_pt = (printable_h / scale) * 0.98  # 2%は安全マージン
+        stretch = target_h_pt / total_h_pt
+        for r in range(1, energy_row + 1):
+            if ws.row_dimensions[r].hidden:
+                continue
+            cur_h = ws.row_dimensions[r].height if ws.row_dimensions[r].height else 15.0
+            ws.row_dimensions[r].height = cur_h * stretch
+
+    for margin_attr in ('left', 'right', 'top', 'bottom'):
+        setattr(ws.page_margins, margin_attr, MARGIN_PT / 72)
+    ws.page_margins.header = 0
+    ws.page_margins.footer = 0
+    ws.sheet_properties.pageSetUpPr.fitToPage = False
+    ws.page_setup.fitToWidth = None
+    ws.page_setup.fitToHeight = None
+    ws.page_setup.scale = max(10, min(400, round(scale * 100 * 0.98)))  # 2%は安全マージン
 
 
 def create_colored_excel(uploaded_file, color_groups=None):
