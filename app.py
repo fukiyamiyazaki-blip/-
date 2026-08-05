@@ -620,11 +620,15 @@ def _detect_sheet_format(df):
         return 'kitanoda_baby'
     if '北野田こども園' in all_text:
         return 'kitanoda'
+    if '完了期' in all_text and '後期' in all_text:  # 岩戸こども園様形式（離乳食・後期/完了期の2段おやつ・園名の記載なし）
+        return 'iwato'
     if '◎は10時おやつ' in all_text or ('材料名' in all_text and '献立名' in all_text):
         return 'omiya'
     if 'つかみ食べ練習用野菜' in all_text:  # 美山保育園形式（月別シート・datetime日付・おやつcol10）
         return 'miyama'
-    if 'うどんの日以外はおかゆ' in all_text:  # めばえの森（yumehanaより先に判定）
+    # 「うどんの日以外はおかゆ」は富喜屋テンプレート系で共通に使われる文言のため、
+    # 「離乳食メニュー」（tomikiya形式の目印）がある場合はそちらを優先する
+    if 'うどんの日以外はおかゆ' in all_text and '離乳食メニュー' not in all_text:  # めばえの森（yumehanaより先に判定）
         return 'mebaenomori'
     if 'さかえ保育園' in all_text and '離乳食' in all_text:  # さかえ保育園 離乳食形式（2週間ローテーション・「日・日」表記）
         return 'sakae_baby'
@@ -1760,6 +1764,99 @@ def _excel_to_text_kitanoda_baby(df, fname=""):
     return "\n".join(lines)
 
 
+def _excel_to_text_iwato(df, fname=""):
+    """岩戸こども園様形式（離乳食・後期/完了期の2段おやつ）→ 構造化テキスト。
+    タイトル行や園名の記載がなく、ヘッダー行の「献立名」「材料」の位置から
+    判定する。1日2行構成（1行目：日付＋主菜＋材料（最大4列）＋調味料3列＋
+    後期/完了期おやつ2列、2行目：副菜＋材料継続）。おやつ欄はセル内改行で
+    「おやつ名\\n（材料）」の形式になっているため、名前と材料を分離して扱う。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    header_row = None
+    for r in range(n_rows):
+        if cv(r, 2) == '献立名' and '材料' in cv(r, 3):
+            header_row = r
+            break
+    if header_row is None:
+        return ""
+
+    snack_cols = [c for c in range(4, n_cols) if any(k in cv(header_row, c) for k in ('後期', '完了期'))]
+    if not snack_cols:
+        snack_cols = [c for c in (10, 11) if c < n_cols]
+    mat_cols = [c for c in range(3, n_cols) if c not in snack_cols]
+
+    _DOW = ['月', '火', '水', '木', '金', '土', '日']
+    _SERIAL_RE = re.compile(r'^(\d{5})(\.0)?$')
+
+    def _split_snack(cell):
+        lines = cell.split('\n')
+        name = lines[0].strip()
+        ing_text = ''
+        if len(lines) > 1:
+            ing_text = re.sub(r'[（(）)]', '', ' '.join(lines[1:])).strip()
+        return name, ing_text
+
+    day_entries = []
+    cur = None
+    for r in range(header_row + 1, n_rows):
+        col0 = cv(r, 0)
+        if col0.startswith(('※', '＊印', '*印')):
+            break
+
+        ymd_m = re.match(r'(\d{4})-(\d{2})-(\d{2})', col0)
+        serial_m = None if ymd_m else _SERIAL_RE.match(col0)
+        name_v = cv(r, 2)
+        mats_v = [cv(r, c) for c in mat_cols if cv(r, c)]
+        snack_cells = [cv(r, c) for c in snack_cols if cv(r, c)]
+
+        if ymd_m:
+            y, mo, d = int(ymd_m.group(1)), int(ymd_m.group(2)), int(ymd_m.group(3))
+            cur = {'year': y, 'month': mo, 'day': d,
+                   'dow': _DOW[datetime.date(y, mo, d).weekday()],
+                   'lunch': [], 'mats': [], 'snack': []}
+            day_entries.append(cur)
+        elif serial_m:
+            dt = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(serial_m.group(1)))
+            cur = {'year': dt.year, 'month': dt.month, 'day': dt.day,
+                   'dow': _DOW[dt.weekday()], 'lunch': [], 'mats': [], 'snack': []}
+            day_entries.append(cur)
+        elif cur is None or not (name_v or mats_v or snack_cells):
+            continue
+
+        if name_v:
+            cur['lunch'].append(name_v)
+        cur['mats'].extend(mats_v)
+        for sc in snack_cells:
+            sname, sing = _split_snack(sc)
+            if sname and sname not in cur['snack']:
+                cur['snack'].append(sname)
+            if sing:
+                cur['mats'].append(sing)
+
+    if not day_entries:
+        return ""
+
+    y0, mo0 = day_entries[0]['year'], day_entries[0]['month']
+    lines = [f"# 献立データ {y0}年{mo0:02d}月", ""]
+    for e in day_entries:
+        lines.append(f"【{e['month']}/{e['day']}({e['dow']})】")
+        if e['lunch']:
+            lines.append(f"昼食: {' / '.join(e['lunch'])}")
+        if e['snack']:
+            lines.append(f"おやつ: {' / '.join(e['snack'])}")
+        if e['mats']:
+            lines.append(f"材料: {', '.join(e['mats'])}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 def _excel_to_text_kunimi(df):
     """
     くにみ子ども園形式（横並び・4列/日・午前/昼食/午後の3食区分・乳児幼児2分量）
@@ -1913,6 +2010,8 @@ def excel_to_text(uploaded_file, sheet_name):
         return _excel_to_text_kitanoda(df, uploaded_file.name)
     if fmt == 'kitanoda_baby':
         return _excel_to_text_kitanoda_baby(df, uploaded_file.name)
+    if fmt == 'iwato':
+        return _excel_to_text_iwato(df, uploaded_file.name)
 
     n_rows, n_cols = df.shape
 
