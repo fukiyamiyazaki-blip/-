@@ -440,6 +440,11 @@ FRUIT_KW       = [
     'もも', '桃', 'ぶどう', 'ブドウ', 'いちご', 'イチゴ', 'メロン', 'すいか',
     'スイカ', 'キウイ', 'なし', '梨', 'マンゴー', 'さくらんぼ',
 ]
+# 果物の種類・有無が日によって変わり得る総称デザート名。献立名にこれらの語が
+# あるだけでは、具体的な果物名を書かない運用が正当（例：「手作りゼリー」の
+# 中身がオレンジ果汁でも、献立名は「ゼリー」のまま）。「材料に果物があるのに
+# 献立名に記載がない」チェック（reverse_naming_check）の母集団から除外する。
+FRUIT_OPTIONAL_DESSERT_KW = ['ゼリー', 'プリン', 'ムース', '寒天', 'ババロア', 'シャーベット']
 # 献立名の特定食材と材料欄の食い違い（表記ゆれ・別の食材へのすり替わり）を
 # 決定的に判定するための同義語グループ。ここに載っている語は「献立名にあれば
 # 材料欄にも（同義語のいずれかで）存在するはず」という前提で照合する。
@@ -3134,9 +3139,10 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         # その運用が支配的な場合にだけ外れ値（記載漏れ）として報告する。
         # （果物を普段から献立名に書かない園まで一律チェックすると誤検知だらけになるため）
         # 「フルーツヨーグルト」等、複数の果物をまとめた総称名（RECIPE_RULESで
-        # FRUIT_KWをそのまま必須材料とする料理名）の日は、個別の果物名を
-        # あえて書かない運用が正当なため、母集団・判定対象から除外する。
-        _fruit_generic_names = [kw for kw, req in RECIPE_RULES if req is FRUIT_KW]
+        # FRUIT_KWをそのまま必須材料とする料理名）や、ゼリー・プリン等の
+        # 果物有無が日替わりの総称デザート名の日は、個別の果物名をあえて
+        # 書かない運用が正当なため、母集団・判定対象から除外する。
+        _fruit_generic_names = [kw for kw, req in RECIPE_RULES if req is FRUIT_KW] + FRUIT_OPTIONAL_DESSERT_KW
         _fruit_reverse_dates = [
             ds for ds in sorted_dates
             if not any(name in (lunch(ds) + ' ' + snack(ds)) for name in _fruit_generic_names)
