@@ -468,8 +468,13 @@ FOOD_SYNONYM_GROUPS = [
     ['マンゴー'],
     ['さくらんぼ'],
     ['チンゲン菜', '青梗菜'],
-    ['牛乳'],
+    ['牛乳', 'ぎゅうにゅう'],
 ]
+
+# 果物等の名前を含むが、実際にはその風味と無関係な慣用的な商品名・料理名。
+# 献立名と材料の照合チェックで誤って「材料に見当たらない」と指摘しないよう、
+# 判定前にこれらの語を献立名テキストから取り除く。
+FOOD_NAME_IDIOMS = ['メロンパン']
 
 
 def reverse_naming_check(kw_group, label, sorted_dates, lunch, snack, ing, day_ngs,
@@ -697,13 +702,18 @@ def _excel_to_text_sakae(df, fname=""):
 
     year_num, month_num, year_month = _extract_year_month(df, fname)
 
+    # 「昼食」から始まる保育園形式に加え、児童養護施設等の「朝食」から始まる
+    # 3食（朝食/昼食/夕食）形式にも対応する。おやつ以外の食事区分はすべて
+    # 「昼食」バケットにまとめて格納する（チェック側は昼食/おやつの2分類のため）。
+    _MEAL_SECTION_LABELS = {'朝食', '昼食', '夕食'}
+
     days = []
     cur = None
 
     for r in range(n_rows):
         col0, col1, col2 = cv(r, 0), cv(r, 1), cv(r, 2)
 
-        if re.match(r'^\d{1,2}(\.0)?$', col0) and col1 == '昼食':
+        if re.match(r'^\d{1,2}(\.0)?$', col0) and col1 in _MEAL_SECTION_LABELS:
             if cur is not None:
                 days.append(cur)
             cur = {'day': int(float(col0)), 'dow': '?', 'lunch': [], 'snack': [], 'mats': [], 'in_snack': False}
@@ -731,6 +741,16 @@ def _excel_to_text_sakae(df, fname=""):
             cur['in_snack'] = True
             if col2:
                 cur['snack'].append(col2)
+            for c in range(3, min(7, n_cols)):
+                v = cv(r, c)
+                if v:
+                    cur['mats'].append(v)
+
+        elif col1 in _MEAL_SECTION_LABELS and cur is not None:
+            # 同じ日の別の食事区分への切り替え（朝食→昼食→夕食）。おやつではない。
+            cur['in_snack'] = False
+            if col2:
+                cur['lunch'].append(col2)
             for c in range(3, min(7, n_cols)):
                 v = cv(r, c)
                 if v:
@@ -2033,13 +2053,14 @@ def excel_to_text(uploaded_file, sheet_name):
         v = str(df.iloc[r, c]).strip()
         return "" if v in ("nan", "", "None") else v
 
-    # 日付行を全行から検索（「N日(曜)」パターンが3個以上ある行をブロック開始とする）
+    # 日付行を全行から検索（「N日(曜)」「N月M日(曜)」パターンが3個以上ある行をブロック開始とする）
+    _WIDE_DATE_RE = re.compile(r'^(?:(\d{1,2})月)?(\d{1,2})日\(([月火水木金土日])\)$')
     blocks = []  # list of (date_row_idx, {col: date_str})
     for r in range(n_rows):
         temp = {}
         for c in range(n_cols):
             v = cell_val(r, c)
-            if re.match(r'^\d+日\([月火水木金土日]\)$', v):
+            if _WIDE_DATE_RE.match(v):
                 temp[c] = v
         if len(temp) >= 3:
             blocks.append((r, temp))
@@ -2056,28 +2077,13 @@ def excel_to_text(uploaded_file, sheet_name):
                 rows.append(f"行{i + 1}: " + " | ".join(cells))
         return "\n".join(rows)
 
-    # 年月を抽出（例：「2026年09月」）。タイトルが右端の列にあるフォーマットも
-    # あるため列は全て走査する（行のみ先頭10行に限定）。
-    year_month = ""
-    month_num = ""
-    for r in range(min(10, n_rows)):
-        for c in range(n_cols):
-            v = cell_val(r, c)
-            m = re.match(r'(\d{4})年(\d{1,2})月', v)
-            if m:
-                year_month = f"{m.group(1)}年{int(m.group(2)):02d}月"
-                month_num = str(int(m.group(2)))
-                break
-        if year_month:
-            break
-
-    # シート内のどこにも年月表記がない形式（宝塚自然幼稚園・若草幼稚園等）向けに、
-    # アップロードファイル名（例：「2026年9月　◯◯幼稚園様.xls」）からのフォールバック抽出。
-    if not year_month:
-        m = re.search(r'(\d{4})年(\d{1,2})月', uploaded_file.name)
-        if m:
-            year_month = f"{m.group(1)}年{int(m.group(2)):02d}月"
-            month_num = str(int(m.group(2)))
+    # 年月を抽出（例：「2026年09月」）。タイトル・ファイル名の全角数字や
+    # 「N月のみ」表記、年の記載なしにも対応する共通ヘルパーを使う。
+    _, _month_num_i, year_month = _extract_year_month(df, uploaded_file.name)
+    month_num = str(_month_num_i) if _month_num_i else ""
+    # 日付ラベルに月が明記されている列（例：「8月31日」）が出た時点でこの値を
+    # 更新し、以降の「N日」のみの列（月をまたいでも再掲されない）に引き継ぐ。
+    cur_month = month_num
 
     skip_vals = {"[昼]", "[午後]", "献立名", "材料", "日付"}
 
@@ -2111,9 +2117,11 @@ def excel_to_text(uploaded_file, sheet_name):
 
         for col_c in sorted(block_date_cols.keys()):
             raw_date = block_date_cols[col_c]
-            dm = re.match(r'(\d+)日\(([月火水木金土日])\)', raw_date)
-            if dm and month_num:
-                date_label = f"{month_num}/{dm.group(1)}({dm.group(2)})"
+            dm = _WIDE_DATE_RE.match(raw_date)
+            if dm.group(1):
+                cur_month = dm.group(1)
+            if cur_month:
+                date_label = f"{cur_month}/{dm.group(2)}({dm.group(3)})"
             else:
                 date_label = raw_date
 
@@ -3222,15 +3230,27 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         #     園内の運用（leave-one-out）を見て判断する ─────
         bare_item_forward_check('お菓子', 'お菓子', sorted_dates, lunch, snack, ing, day_ngs)
 
-        # ── ヨーグルト：複合料理名（フルーツヨーグルト・桃ヨーグルト等）は常時必須、
-        #     単体提供（おやつ等で「ヨーグルト」単独の項目として出る場合）は運用依存 ─────
-        # 園によっては単体提供時に材料欄へ記載しない運用がある（伊勢原立正幼稚園で確認）。
-        # 「ヨーグルト」を含む項目単体がその日の献立に複合名で出ていない場合は、
-        # bare_item_forward_check の園内運用判定（leave-one-out）に委ねる。
-        for ds in sorted_dates:
-            items = [re.sub(r'[（(].*?[）)]', '', i).strip()
-                     for i in (lunch(ds) + '/' + snack(ds)).split('/')]
-            if any('ヨーグルト' in i and i != 'ヨーグルト' for i in items) and 'ヨーグルト' not in ing(ds):
+        # ── ヨーグルト：複合料理名（フルーツヨーグルト・桃ヨーグルト等）は基本的に
+        #     材料欄にも記載されるが、「飲むヨーグルト」「◯◯ヨーグルト（商品名）」の
+        #     ように購入品をそのまま提供するだけの園では複合名でも材料欄に書かない
+        #     運用がある（エリザベスサンダースホーム様で確認）。単体提供と同様、
+        #     ファイル内の運用パターン（leave-one-out）で判定する。
+        def _yogurt_compound_items(text):
+            items = [re.sub(r'[（(].*?[）)]', '', i).strip() for i in text.split('/')]
+            return [i for i in items if 'ヨーグルト' in i and i != 'ヨーグルト']
+
+        _yogurt_compound_days = [
+            ds for ds in sorted_dates
+            if _yogurt_compound_items(lunch(ds) + '/' + snack(ds))
+        ]
+        _yogurt_compound_named = {ds for ds in _yogurt_compound_days if 'ヨーグルト' in ing(ds)}
+        for ds in _yogurt_compound_days:
+            if ds in _yogurt_compound_named:
+                continue
+            others = [d for d in _yogurt_compound_days if d != ds]
+            if len(others) < 2:
+                continue
+            if sum(d in _yogurt_compound_named for d in others) / len(others) >= 0.85:
                 day_ngs[ds].append('● 「ヨーグルト」があるが材料にヨーグルトなし')
         bare_item_forward_check('ヨーグルト', 'ヨーグルト', sorted_dates, lunch, snack, ing, day_ngs)
 
@@ -3241,9 +3261,17 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         #   ＝ここに載っている食材については、この決定的照合だけで完結する）
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
+            ls_check = ls_text
+            for idiom in FOOD_NAME_IDIOMS:
+                ls_check = ls_check.replace(idiom, '')
             i_text  = ing(ds)
             for group in FOOD_SYNONYM_GROUPS:
-                if any(g in ls_text for g in group) and not any(g in i_text for g in group):
+                if any(g in ls_check for g in group) and not any(g in i_text for g in group):
+                    # 「ゼリー」等の総称デザート名は、風味のもとになる果物が材料欄に
+                    # なくても例外とする運用がある（海野さんチェックのルール文面にも
+                    # 「ゼリーは該当食材がなくてOK」と明記）
+                    if any(g in FRUIT_KW for g in group) and any(dn in ls_text for dn in FRUIT_OPTIONAL_DESSERT_KW):
+                        continue
                     day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（表記が違っていないか要確認）')
 
         # ── 材料に果物があるのに献立名に記載がない（逆方向の表記漏れ）─────
