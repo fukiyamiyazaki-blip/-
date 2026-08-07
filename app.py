@@ -2,6 +2,7 @@ import re
 import json
 import base64
 import datetime
+import unicodedata
 import urllib.request
 import urllib.error
 import streamlit as st
@@ -423,7 +424,7 @@ FISH_KW        = ['サケ', 'サーモン', 'サバ', 'サワラ', 'タラ', '�
                   'シシャモ', 'ほっけ', '白身魚']
 FISH_WITH_TUNA = FISH_KW + ['ツナ']
 TOFU_KW        = ['木綿豆腐', '焼き豆腐', '厚揚げ', '油揚げ', '高野豆腐']
-NOODLE_KW      = ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '丼']
+NOODLE_KW      = ['スパゲティ', 'うどん', 'めん', '麺', 'そば', '丼', 'ラーメン']
 MUSHROOM_KW    = ['しめじ', 'エリンギ', 'えのき', 'なめこ']
 MON_NG_ITEMS   = ['ロールパン', '食パン', 'りんご', 'バナナ', 'オレンジ',
                   '太もやし', '切干大根', 'ひじき', '高野豆腐']
@@ -656,20 +657,31 @@ def _extract_year_month(df, fname=""):
     列は全て走査する（行のみ先頭10行に限定）。(year_int, month_int, label_str)
     シート内に年月表記がない場合（月が複数シートに分かれ、2シート目以降には
     タイトルを繰り返さない形式等）は、アップロードファイル名からのフォールバック
-    抽出を試みる（例：「2026年9月　◯◯こども園様.xls」）。"""
+    抽出を試みる（例：「2026年9月　◯◯こども園様.xls」）。全角数字（「９月」等）
+    にも対応するため、判定前にNFKC正規化で半角化する。年の記載が全くなく
+    月のみの場合（例：「９月普通献立.xls」）は、実行時点の日付から年を推定する
+    （対象月が現在月以降ならその年、過去月なら翌年とみなす）。"""
     n_rows, n_cols = df.shape
     for r in range(min(10, n_rows)):
         for c in range(n_cols):
-            v = str(df.iloc[r, c]).strip()
+            v = unicodedata.normalize('NFKC', str(df.iloc[r, c]).strip())
             m = re.match(r'(\d{4})年(\d{1,2})月', v)
             if m:
                 y, mo = int(m.group(1)), int(m.group(2))
                 return y, mo, f"{y}年{mo:02d}月"
     if fname:
-        m = re.search(r'(\d{4})年(\d{1,2})月', fname)
+        fname_n = unicodedata.normalize('NFKC', fname)
+        m = re.search(r'(\d{4})年(\d{1,2})月', fname_n)
         if m:
             y, mo = int(m.group(1)), int(m.group(2))
             return y, mo, f"{y}年{mo:02d}月"
+        m = re.search(r'(\d{1,2})月', fname_n)
+        if m:
+            mo = int(m.group(1))
+            if 1 <= mo <= 12:
+                today = datetime.date.today()
+                y = today.year if mo >= today.month else today.year + 1
+                return y, mo, f"{y}年{mo:02d}月"
     return 0, 0, ""
 
 
@@ -3194,6 +3206,7 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('わかめ',           ['わかめ']),  # 「わかめスープ」「わかめご飯」等
             ('果物',             FRUIT_KW),
             ('フルーツヨーグルト', FRUIT_KW),
+            ('フルーツポンチ', FRUIT_KW),
         ]
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
