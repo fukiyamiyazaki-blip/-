@@ -618,6 +618,9 @@ def push_rules_list_to_github(rules_list):
 def _detect_sheet_format(df):
     """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'yamazaki' / 'kunimi' / 'default'"""
     all_text = ' '.join(str(v) for v in df.values.flatten() if pd.notna(v))
+    all_text_norm = unicodedata.normalize('NFKC', all_text)
+    if 'つの食品群' in all_text_norm:  # みのりこども園形式（縦並び・黄/赤/緑の3群に材料欄が分かれる）
+        return 'minori'
     if '熱と力になるもの' in all_text:
         return 'sakae'
     # 北野田こども園様形式（サイクル献立）：'材料名'+'献立名'（omiya）や'離乳食メニュー'
@@ -765,6 +768,90 @@ def _excel_to_text_sakae(df, fname=""):
                 v = cv(r, c)
                 if v:
                     cur['mats'].append(v)
+
+    if cur is not None:
+        days.append(cur)
+
+    lines = []
+    if year_month:
+        lines += [f"# 献立データ {year_month}", ""]
+
+    for d in days:
+        label = f"{month_num}/{d['day']}({d['dow']})" if month_num else f"?/{d['day']}({d['dow']})"
+        lines.append(f"【{label}】")
+        if d['lunch']:
+            lines.append(f"昼食: {' / '.join(d['lunch'])}")
+        if d['snack']:
+            lines.append(f"おやつ: {' / '.join(d['snack'])}")
+        if d['mats']:
+            lines.append(f"材料: {', '.join(d['mats'])}")
+        lines.append("")
+
+    return '\n'.join(lines)
+
+
+def _excel_to_text_minori(df, fname=""):
+    """みのりこども園形式（縦並び・材料欄が黄◇/赤◇/緑◇の3群に横並び分割）→ 構造化テキスト。
+    レイアウトはsakae形式とほぼ同一（col0=日付/曜日、col1=食事区分、col2=献立名）だが、
+    材料が単一の連続列ではなく列5以降に黄/赤/緑の3群として分散している点のみが異なる。
+    3群は横に並べて見れば単純な材料の集合なので、列5以降を全て結合して1つの材料リストとして扱う。"""
+    n_rows, n_cols = df.shape
+
+    def cv(r, c):
+        if r < 0 or r >= n_rows or c < 0 or c >= n_cols:
+            return ""
+        v = str(df.iloc[r, c]).strip()
+        return "" if v in ("nan", "", "None") else v
+
+    year_num, month_num, year_month = _extract_year_month(df, fname)
+
+    _MEAL_SECTION_LABELS = {'朝食', '昼食', '夕食'}
+    _MAT_COL_START = 5  # 黄◇群の開始列（列6は黄◇群のマージセル残骸で常に空）
+
+    def mats_in_row(r):
+        return [v for c in range(_MAT_COL_START, n_cols) if (v := cv(r, c))]
+
+    days = []
+    cur = None
+
+    for r in range(n_rows):
+        col0, col1, col2 = cv(r, 0), cv(r, 1), cv(r, 2)
+
+        if re.match(r'^\d{1,2}(\.0)?$', col0) and col1 in _MEAL_SECTION_LABELS:
+            if cur is not None:
+                days.append(cur)
+            cur = {'day': int(float(col0)), 'dow': '?', 'lunch': [], 'snack': [], 'mats': [], 'in_snack': False}
+            if col2:
+                cur['lunch'].append(col2)
+            cur['mats'] += mats_in_row(r)
+
+        elif re.match(r'^[月火水木金土日]$', col0) and cur is not None:
+            cur['dow'] = col0
+            if col2 and col1 == '':
+                if cur['in_snack']:
+                    cur['snack'].append(col2)
+                else:
+                    cur['lunch'].append(col2)
+                cur['mats'] += mats_in_row(r)
+
+        elif 'おやつ' in col1 and cur is not None:
+            cur['in_snack'] = True
+            if col2:
+                cur['snack'].append(col2)
+            cur['mats'] += mats_in_row(r)
+
+        elif col1 in _MEAL_SECTION_LABELS and cur is not None:
+            cur['in_snack'] = False
+            if col2:
+                cur['lunch'].append(col2)
+            cur['mats'] += mats_in_row(r)
+
+        elif cur is not None and col2 and col0 == '' and col1 == '':
+            if cur['in_snack']:
+                cur['snack'].append(col2)
+            else:
+                cur['lunch'].append(col2)
+            cur['mats'] += mats_in_row(r)
 
     if cur is not None:
         days.append(cur)
@@ -2016,6 +2103,8 @@ def excel_to_text(uploaded_file, sheet_name):
 
     # フォーマット自動検出 → 専用パーサーに振り分け
     fmt = _detect_sheet_format(df)
+    if fmt == 'minori':
+        return _excel_to_text_minori(df, uploaded_file.name)
     if fmt == 'sakae':
         return _excel_to_text_sakae(df, uploaded_file.name)
     if fmt == 'omiya':
@@ -2452,6 +2541,17 @@ def create_colored_excel(uploaded_file, color_groups=None):
             # 列3-6が材料
             for r in range(n_rows):
                 for c in range(3, min(7, n_cols)):
+                    v = cv_fn(r, c)
+                    if not v:
+                        continue
+                    for kw_list, fc in ING_COLOR_RULES:
+                        if any(kw in v for kw in kw_list):
+                            af_fn(r, c, fc)
+                            break
+        elif fmt == 'minori':
+            # みのりこども園: 列5以降が黄◇/赤◇/緑◇の3群材料
+            for r in range(n_rows):
+                for c in range(5, n_cols):
                     v = cv_fn(r, c)
                     if not v:
                         continue
