@@ -641,7 +641,11 @@ def _detect_sheet_format(df):
         return 'mebaenomori'
     if 'さかえ保育園' in all_text and '離乳食' in all_text:  # さかえ保育園 離乳食形式（2週間ローテーション・「日・日」表記）
         return 'sakae_baby'
-    if '京町堀バンビ園' in all_text:  # 京町堀バンビ園形式（離乳食・Excelシリアル日付・おやつ単一列）
+    if '京町堀バンビ園' in all_text and '離乳食' in all_text:
+        # 京町堀バンビ園形式（離乳食・Excelシリアル日付・おやつ単一列）。
+        # 同園は幼児・普通食用に「N日(曜)」横並びブロック＋「材料」見出しの
+        # 別レイアウト（defaultパーサーで正しく処理できる）も提出してくるため、
+        # 園名だけでなく「離乳食」の記載も条件にして誤判定を防ぐ。
         return 'kyomachibori'
     if '離乳食メニュー' in all_text:  # 富喜屋提供の離乳食テンプレート（ぴよ・ぴよ保育園、鴻池第二バンビ等・複数園で共通）
         return 'tomikiya'
