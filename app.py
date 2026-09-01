@@ -1138,10 +1138,11 @@ def _excel_to_text_yamazaki(df, fname=""):
     for block_idx, (date_row, date_cols) in enumerate(blocks):
         block_end = blocks[block_idx + 1][0] if block_idx + 1 < len(blocks) else n_rows
 
-        # 材料表開始行（col 1 が "材料表" または "材料"）
+        # 材料表開始行（col 0 or col 1 が "材料表" または "材料"。
+        # 「日付」「献立名」と同じ列に来る場合と、1列ずれる場合の両方がある）
         mat_row = None
         for r in range(date_row + 1, block_end):
-            if cv(r, 1) in ("材料表", "材料"):
+            if cv(r, 0) in ("材料表", "材料") or cv(r, 1) in ("材料表", "材料"):
                 mat_row = r
                 break
 
