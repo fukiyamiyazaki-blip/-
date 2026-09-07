@@ -354,9 +354,11 @@ def _parse_structured(excel_text):
     excel_text を日付ごとの構造体に変換。
     Returns: (year, month_num, sorted_dates, entries)
       entries[date_str] = {'lunch': str, 'snack': str, 'ingredients': str,
-                            'snack_am': str, 'snack_pm': str}
+                            'snack_am': str, 'snack_pm': str, 'isolated_ingredients': str}
       snack_am/snack_pm は「午前おやつ:」「午後おやつ:」が出力される形式（くにみ子ども園等）
       でのみ入る。他形式では空文字のまま（既存チェックへの影響なし）。
+      isolated_ingredientsは「単独材料:」（横並び形式で、前後に他の材料が並ばず
+      1件だけで孤立している材料）が出力される形式でのみ入る。
     """
     year, month_num = 0, 0
     ym = re.search(r'(\d{4})年(\d+)月', excel_text)
@@ -369,7 +371,7 @@ def _parse_structured(excel_text):
         if dm:
             current = dm.group(1)
             entries[current] = {'lunch': '', 'snack': '', 'ingredients': '',
-                                 'snack_am': '', 'snack_pm': ''}
+                                 'snack_am': '', 'snack_pm': '', 'isolated_ingredients': ''}
         elif current:
             if line.startswith('昼食:'):
                 entries[current]['lunch'] = line[3:].strip()
@@ -379,6 +381,8 @@ def _parse_structured(excel_text):
                 entries[current]['snack_pm'] = line[6:].strip()
             elif line.startswith('おやつ:'):
                 entries[current]['snack'] = line[4:].strip()
+            elif line.startswith('単独材料:'):
+                entries[current]['isolated_ingredients'] = line[5:].strip()
             elif line.startswith('材料:'):
                 entries[current]['ingredients'] = line[3:].strip()
 
@@ -614,6 +618,27 @@ def push_rules_list_to_github(rules_list):
 # ─────────────────────────────────────────────
 # 多形式Excelパーサー（さかえ保育園・おおみや・ゆめのはな対応）
 # ─────────────────────────────────────────────
+
+def _find_isolated_items(get_val, is_valid, r_start, r_end, col):
+    """材料表セクションを空白行で区切って「まとまり」に分け、前後に他の材料が
+    並ばず1件だけで孤立しているものを返す。横並びの材料欄は献立ごとに空白行で
+    区切られたレシピ単位のまとまりになっているため、1件だけで孤立している材料は
+    レシピの一部（調理用途）ではなく単独提供された可能性が高いと判断できる
+    （例：牛乳がクリームシチューの材料一式と一緒に並んでいれば調理用、
+    ジョアだけが前後空白で単独に並んでいれば飲み物としての単独提供）。"""
+    groups, cur = [], []
+    for r in range(r_start, r_end):
+        v = get_val(r, col)
+        if is_valid(v):
+            cur.append(v)
+        else:
+            if cur:
+                groups.append(cur)
+            cur = []
+    if cur:
+        groups.append(cur)
+    return [g[0] for g in groups if len(g) == 1]
+
 
 def _detect_sheet_format(df):
     """シートのフォーマット種別を返す: 'sakae' / 'omiya' / 'mebaenomori' / 'yumehana' / 'yamazaki' / 'kunimi' / 'default'"""
@@ -1176,11 +1201,13 @@ def _excel_to_text_yamazaki(df, fname=""):
 
             # 材料は col_c+1 から読む（材料表セクション）
             mats = []
+            isolated = []
             if mat_row is not None:
                 for r in range(mat_row, block_end):
                     v = cv(r, col_c + 1)
                     if is_valid(v):
                         mats.append(v)
+                isolated = _find_isolated_items(cv, is_valid, mat_row, block_end, col_c + 1)
 
             lines.append(f"【{date_label}】")
             if lunch:
@@ -1189,6 +1216,8 @@ def _excel_to_text_yamazaki(df, fname=""):
                 lines.append(f"おやつ: {' / '.join(snack)}")
             if mats:
                 lines.append(f"材料: {', '.join(mats)}")
+            if isolated:
+                lines.append(f"単独材料: {', '.join(isolated)}")
             lines.append("")
 
     return '\n'.join(lines)
@@ -2252,11 +2281,13 @@ def excel_to_text(uploaded_file, sheet_name):
 
             # 材料（ブロック内のみ）
             mats = []
+            isolated = []
             if block_mat_row is not None:
                 for r in range(block_mat_row, block_end):
                     v = cell_val(r, col_c)
                     if is_valid_cell(v):
                         mats.append(v)
+                isolated = _find_isolated_items(cell_val, is_valid_cell, block_mat_row, block_end, col_c)
 
             if lunch:
                 lines.append(f"昼食: {' / '.join(lunch)}")
@@ -2264,6 +2295,8 @@ def excel_to_text(uploaded_file, sheet_name):
                 lines.append(f"おやつ: {' / '.join(snack)}")
             if mats:
                 lines.append(f"材料: {', '.join(mats)}")
+            if isolated:
+                lines.append(f"単独材料: {', '.join(isolated)}")
             lines.append("")
 
     return "\n".join(lines)
@@ -3079,6 +3112,9 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     def snack(ds):
         return entries[ds]['snack']
 
+    def isolated_ing(ds):
+        return entries[ds]['isolated_ingredients']
+
     def snack_am(ds):
         return entries[ds].get('snack_am', '')
 
@@ -3401,6 +3437,21 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             if not any(name in (lunch(ds) + ' ' + snack(ds)) for name in _fruit_generic_names)
         ]
         reverse_naming_check(FRUIT_KW, '果物', _fruit_reverse_dates, lunch, snack, ing, day_ngs)
+
+        # ── 単独提供の乳飲料が献立名に記載されているか ────────────────
+        # 横並び形式（山崎幼稚園・オンビーノスクエア野方等）では、材料表は
+        # 空白行区切りでレシピ単位のまとまりになっている。牛乳がクリームシチュー等
+        # 他の材料と一緒のまとまりに出てくる場合は調理用途（従来通りチェック対象外）だが、
+        # ジョア等が前後に何もない単独の1件として出てくる場合は飲み物として単独提供
+        # されたと判断できるため、献立名（昼食・おやつ問わず）に記載がなければNGとする。
+        # 横並び形式以外（isolated_ingredientsが常に空）では発火しない。
+        DRINK_KW = ['牛乳', 'ジョア']
+        for ds in sorted_dates:
+            ls_text = lunch(ds) + ' ' + snack(ds)
+            iso_text = isolated_ing(ds)
+            for kw in DRINK_KW:
+                if kw in iso_text and kw not in ls_text:
+                    day_ngs[ds].append(f'● 材料に「{kw}」が単独で入っているが献立名に記載がない（飲み物提供の明記漏れの可能性）')
 
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
