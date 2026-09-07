@@ -2186,6 +2186,13 @@ def excel_to_text(uploaded_file, sheet_name):
             return False
         if v.startswith("※"):  # 注記・免責文を除外
             return False
+        try:
+            float(v)  # 栄養価（エネルギー・蛋白質等）の数値は除外。
+                      # 最終ブロックはblock_endがシート末尾までになるため、
+                      # 材料表の下にある栄養価サマリー行まで材料として拾ってしまう
+            return False
+        except ValueError:
+            pass
         return True
 
     lines = []
