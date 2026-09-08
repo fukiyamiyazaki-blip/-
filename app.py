@@ -2299,7 +2299,24 @@ def excel_to_text(uploaded_file, sheet_name):
             if block_mat_row is not None:
                 break
 
+        # 献立名と材料表の間に「栄養価」セクション（エネルギー・蛋白質等の
+        # サマリー行）が挟まる形式がある。これは元ファイル側の正規の記載だが、
+        # 区切りマーカーが「材料」しかないと献立名／おやつの行範囲に栄養価の
+        # 数値行まで含んでしまうため、「栄養価」も区切りとして別途検出し、
+        # 材料マーカーより先に見つかった場合はそちらを献立名セクションの
+        # 終端とする（栄養価行そのものは昼食・おやつ・材料のいずれにも含めない）。
+        block_nutrition_row = None
+        for r in range(block_date_row + 1, block_end):
+            for c in range(min(5, n_cols)):
+                if cell_val(r, c) == "栄養価":
+                    block_nutrition_row = r
+                    break
+            if block_nutrition_row is not None:
+                break
+
         dish_end = block_mat_row if block_mat_row is not None else block_end
+        if block_nutrition_row is not None and block_nutrition_row < dish_end:
+            dish_end = block_nutrition_row
 
         for col_c in sorted(block_date_cols.keys()):
             raw_date = block_date_cols[col_c]
