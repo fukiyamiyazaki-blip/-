@@ -473,6 +473,7 @@ FOOD_SYNONYM_GROUPS = [
     ['さくらんぼ'],
     ['チンゲン菜', '青梗菜'],
     ['牛乳', 'ぎゅうにゅう'],
+    ['小松菜'],
 ]
 
 # 果物等の名前を含むが、実際にはその風味と無関係な慣用的な商品名・料理名。
@@ -3227,6 +3228,23 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                 ninj_cnt = toks.count('人参')
                 if ninj_cnt >= 3:
                     day_ngs[ds].append(f'● 同日「人参」{ninj_cnt}回使用')
+
+                # 材料表内で2〜4個の食材の並びがそのまま連続して繰り返されている場合。
+                # 個別食材の出現回数（酢・みそ・玉ねぎ・人参等）は上のチェックで別途
+                # 対応済みのため、ここでは「同じ並び順の食材が連続して丸ごと重複」して
+                # いるケース（同じ料理の材料行をコピペで二重入力してしまったミス）のみを
+                # 検出する。例：「片栗粉,黒ごま,片栗粉,黒ごま」
+                for k in (2, 3, 4):
+                    dup_seq = None
+                    for i in range(len(toks) - 2 * k + 1):
+                        if toks[i:i + k] == toks[i + k:i + 2 * k]:
+                            dup_seq = toks[i:i + k]
+                            break
+                    if dup_seq:
+                        day_ngs[ds].append(
+                            f'● 材料「{"、".join(dup_seq)}」が連続して重複入力されている可能性（コピペミスの疑い）'
+                        )
+                        break
 
     # ── 月上限（4回目に到達した日に記録） ─────────────────────
     if check_monthly_limit:
