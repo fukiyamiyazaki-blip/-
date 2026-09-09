@@ -3262,6 +3262,27 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                 day_ngs[ds_c].append(f'● {token}2日連続')
 
     # ── 同日チェック ───────────────────────────────────────────
+    # コピペミス（材料表内の連続重複入力）の検出は、酢2回・玉ねぎ3回等の
+    # メニューの多様性に関する業務ルール（園によって許容範囲が異なりうる）とは
+    # 性質が異なり、「同じ並びの材料がそのまま連続して重複」しているのは
+    # どの園・どのルールを選んでいても常にデータ入力ミスと言えるため、
+    # 選択中ルールの文言（check_same_day_dup）に関係なく常時実行する。
+    for ds in sorted_dates:
+        i_text = ing(ds)
+        toks = _split_ing(i_text)
+
+        for k in (2, 3, 4):
+            dup_seq = None
+            for i in range(len(toks) - 2 * k + 1):
+                if toks[i:i + k] == toks[i + k:i + 2 * k]:
+                    dup_seq = toks[i:i + k]
+                    break
+            if dup_seq:
+                day_ngs[ds].append(
+                    f'● 材料「{"、".join(dup_seq)}」が連続して重複入力されている可能性（コピペミスの疑い）'
+                )
+                break
+
     if check_imo or check_same_day_dup:
         for ds in sorted_dates:
             i_text = ing(ds)
@@ -3300,23 +3321,6 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                 ninj_cnt = toks.count('人参')
                 if ninj_cnt >= 3:
                     day_ngs[ds].append(f'● 同日「人参」{ninj_cnt}回使用')
-
-                # 材料表内で2〜4個の食材の並びがそのまま連続して繰り返されている場合。
-                # 個別食材の出現回数（酢・みそ・玉ねぎ・人参等）は上のチェックで別途
-                # 対応済みのため、ここでは「同じ並び順の食材が連続して丸ごと重複」して
-                # いるケース（同じ料理の材料行をコピペで二重入力してしまったミス）のみを
-                # 検出する。例：「片栗粉,黒ごま,片栗粉,黒ごま」
-                for k in (2, 3, 4):
-                    dup_seq = None
-                    for i in range(len(toks) - 2 * k + 1):
-                        if toks[i:i + k] == toks[i + k:i + 2 * k]:
-                            dup_seq = toks[i:i + k]
-                            break
-                    if dup_seq:
-                        day_ngs[ds].append(
-                            f'● 材料「{"、".join(dup_seq)}」が連続して重複入力されている可能性（コピペミスの疑い）'
-                        )
-                        break
 
     # ── 月上限（4回目に到達した日に記録） ─────────────────────
     if check_monthly_limit:
