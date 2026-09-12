@@ -3538,14 +3538,17 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         # 他の材料と一緒のまとまりに出てくる場合は調理用途（従来通りチェック対象外）だが、
         # ジョア等が前後に何もない単独の1件として出てくる場合は飲み物として単独提供
         # されたと判断できるため、献立名（昼食・おやつ問わず）に記載がなければNGとする。
+        # 「お菓子」も同様に、材料欄には単独で入っているのに献立名側（おやつ欄）が
+        # 丸ごと空欄になっている記入漏れが実際に見つかったため対象に追加した
+        # （緑ガ丘認定こども園10/17：おやつ欄が空欄、材料欄には「お菓子」単独で記載）。
         # 横並び形式以外（isolated_ingredientsが常に空）では発火しない。
-        DRINK_KW = ['牛乳', 'ジョア']
+        ISOLATED_ITEM_KW = ['牛乳', 'ジョア', 'お菓子']
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
             iso_text = isolated_ing(ds)
-            for kw in DRINK_KW:
+            for kw in ISOLATED_ITEM_KW:
                 if kw in iso_text and kw not in ls_text:
-                    day_ngs[ds].append(f'● 材料に「{kw}」が単独で入っているが献立名に記載がない（飲み物提供の明記漏れの可能性）')
+                    day_ngs[ds].append(f'● 材料に「{kw}」が単独で入っているが献立名に記載がない（明記漏れの可能性）')
 
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
