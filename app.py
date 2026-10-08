@@ -2352,29 +2352,48 @@ def excel_to_text(uploaded_file, sheet_name):
                         afternoon_start = r
                         break
 
+            # 献立名セクション内に、隣列（1列右）に一人分重量の数値が入った
+            # 材料行が紛れ込む書式がある（例：伊勢原立正幼稚園様のおやつ欄。
+            # 「材料」ラベル行より手前に「ヨーグルト(加糖) 50」のように
+            # そのおやつ専用の材料・重量が書かれる）。献立名ではなく材料として
+            # 扱わないと、献立名が総称「お菓子」のまま材料欄だけ具体的な
+            # ヨーグルト(加糖)になっているケースを検出できない。
+            def _is_weight_flanked(r):
+                wv = cell_val(r, col_c + 1)
+                if not wv:
+                    return False
+                try:
+                    float(wv)
+                    return True
+                except ValueError:
+                    return False
+
             # 昼食献立
             lunch = []
+            premat = []
             for r in range(block_date_row + 1, afternoon_start):
                 v = cell_val(r, col_c)
                 if is_valid_cell(v):
-                    lunch.append(v)
+                    (premat if _is_weight_flanked(r) else lunch).append(v)
 
             # おやつ
             snack = []
             for r in range(afternoon_start, dish_end):
                 v = cell_val(r, col_c)
                 if is_valid_cell(v):
-                    snack.append(v)
+                    (premat if _is_weight_flanked(r) else snack).append(v)
 
             # 材料（ブロック内のみ）
-            mats = []
-            isolated = []
+            mats = list(premat)
+            # premat（献立名欄に紛れていた重量付き材料）は、構造上すでに
+            # 前後を空白行で区切られた単独項目なので、そのまま単独材料として扱う
+            isolated = list(premat)
             if block_mat_row is not None:
                 for r in range(block_mat_row, block_end):
                     v = cell_val(r, col_c)
                     if is_valid_cell(v):
                         mats.append(v)
-                isolated = _find_isolated_items(cell_val, is_valid_cell, block_mat_row, block_end, col_c)
+                isolated += _find_isolated_items(cell_val, is_valid_cell, block_mat_row, block_end, col_c)
 
             if lunch:
                 lines.append(f"昼食: {' / '.join(lunch)}")
@@ -3562,8 +3581,12 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
         # 「お菓子」も同様に、材料欄には単独で入っているのに献立名側（おやつ欄）が
         # 丸ごと空欄になっている記入漏れが実際に見つかったため対象に追加した
         # （緑ガ丘認定こども園10/17：おやつ欄が空欄、材料欄には「お菓子」単独で記載）。
+        # 「ヨーグルト」も同様の考え方で対象に追加。献立名は総称「お菓子」のままで、
+        # 材料欄（おやつ専用の重量付き材料行）だけ具体的な「ヨーグルト(加糖)」等に
+        # なっているケースを検出する（伊勢原立正幼稚園様11/14で確認：献立名「お菓子」・
+        # 材料「ヨーグルト(加糖)」）。
         # 横並び形式以外（isolated_ingredientsが常に空）では発火しない。
-        ISOLATED_ITEM_KW = ['牛乳', 'ジョア', 'お菓子']
+        ISOLATED_ITEM_KW = ['牛乳', 'ジョア', 'お菓子', 'ヨーグルト']
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
             iso_text = isolated_ing(ds)
