@@ -359,6 +359,10 @@ def _parse_structured(excel_text):
       でのみ入る。他形式では空文字のまま（既存チェックへの影響なし）。
       isolated_ingredientsは「単独材料:」（横並び形式で、前後に他の材料が並ばず
       1件だけで孤立している材料）が出力される形式でのみ入る。
+      ingredient_groupsは「材料グループ:」（横並び形式で、空白行区切りの
+      レシピ単位のまとまりをグループごとに ';' 区切りで保持したもの。
+      同日チェックのコピペミス検出で、グループをまたいだ偶然の一致を
+      誤検出しないために使う）が出力される形式でのみ入る。
     """
     year, month_num = 0, 0
     ym = re.search(r'(\d{4})年(\d+)月', excel_text)
@@ -371,7 +375,8 @@ def _parse_structured(excel_text):
         if dm:
             current = dm.group(1)
             entries[current] = {'lunch': '', 'snack': '', 'ingredients': '',
-                                 'snack_am': '', 'snack_pm': '', 'isolated_ingredients': ''}
+                                 'snack_am': '', 'snack_pm': '', 'isolated_ingredients': '',
+                                 'ingredient_groups': ''}
         elif current:
             if line.startswith('昼食:'):
                 entries[current]['lunch'] = line[3:].strip()
@@ -383,6 +388,8 @@ def _parse_structured(excel_text):
                 entries[current]['snack'] = line[4:].strip()
             elif line.startswith('単独材料:'):
                 entries[current]['isolated_ingredients'] = line[5:].strip()
+            elif line.startswith('材料グループ:'):
+                entries[current]['ingredient_groups'] = line[7:].strip()
             elif line.startswith('材料:'):
                 entries[current]['ingredients'] = line[3:].strip()
 
@@ -689,13 +696,8 @@ def push_rules_list_to_github(rules_list):
 # 多形式Excelパーサー（さかえ保育園・おおみや・ゆめのはな対応）
 # ─────────────────────────────────────────────
 
-def _find_isolated_items(get_val, is_valid, r_start, r_end, col):
-    """材料表セクションを空白行で区切って「まとまり」に分け、前後に他の材料が
-    並ばず1件だけで孤立しているものを返す。横並びの材料欄は献立ごとに空白行で
-    区切られたレシピ単位のまとまりになっているため、1件だけで孤立している材料は
-    レシピの一部（調理用途）ではなく単独提供された可能性が高いと判断できる
-    （例：牛乳がクリームシチューの材料一式と一緒に並んでいれば調理用、
-    ジョアだけが前後空白で単独に並んでいれば飲み物としての単独提供）。"""
+def _group_valid_runs(get_val, is_valid, r_start, r_end, col):
+    """材料表セクションを空白行で区切って「まとまり（レシピ単位）」のリストに分ける。"""
     groups, cur = [], []
     for r in range(r_start, r_end):
         v = get_val(r, col)
@@ -707,6 +709,17 @@ def _find_isolated_items(get_val, is_valid, r_start, r_end, col):
             cur = []
     if cur:
         groups.append(cur)
+    return groups
+
+
+def _find_isolated_items(get_val, is_valid, r_start, r_end, col):
+    """材料表セクションを空白行で区切って「まとまり」に分け、前後に他の材料が
+    並ばず1件だけで孤立しているものを返す。横並びの材料欄は献立ごとに空白行で
+    区切られたレシピ単位のまとまりになっているため、1件だけで孤立している材料は
+    レシピの一部（調理用途）ではなく単独提供された可能性が高いと判断できる
+    （例：牛乳がクリームシチューの材料一式と一緒に並んでいれば調理用、
+    ジョアだけが前後空白で単独に並んでいれば飲み物としての単独提供）。"""
+    groups = _group_valid_runs(get_val, is_valid, r_start, r_end, col)
     return [g[0] for g in groups if len(g) == 1]
 
 
@@ -2388,12 +2401,14 @@ def excel_to_text(uploaded_file, sheet_name):
             # premat（献立名欄に紛れていた重量付き材料）は、構造上すでに
             # 前後を空白行で区切られた単独項目なので、そのまま単独材料として扱う
             isolated = list(premat)
+            mat_groups = [[v] for v in premat]
             if block_mat_row is not None:
                 for r in range(block_mat_row, block_end):
                     v = cell_val(r, col_c)
                     if is_valid_cell(v):
                         mats.append(v)
                 isolated += _find_isolated_items(cell_val, is_valid_cell, block_mat_row, block_end, col_c)
+                mat_groups += _group_valid_runs(cell_val, is_valid_cell, block_mat_row, block_end, col_c)
 
             if lunch:
                 lines.append(f"昼食: {' / '.join(lunch)}")
@@ -2403,6 +2418,15 @@ def excel_to_text(uploaded_file, sheet_name):
                 lines.append(f"材料: {', '.join(mats)}")
             if isolated:
                 lines.append(f"単独材料: {', '.join(isolated)}")
+            if mat_groups:
+                # 空白行で区切られたレシピ単位のまとまり（グループ）をそのまま保持して出力。
+                # 「材料」の1行に全グループを連結済みの平坦なテキストにしてしまうと、
+                # 本来は別々のレシピが偶然同じ並びの材料を使っているだけなのに、
+                # コピペミス（連続重複）と誤判定してしまうケースがあるため
+                # （みのべ幼稚園様11/16：フルーツヨーグルトの「黄桃缶,砂糖」と、
+                # 別の空白行区切りのまとまりの「黄桃缶,砂糖」が偶然同じだっただけ）、
+                # グループ境界をチェック側でも参照できるよう別行で出力する。
+                lines.append(f"材料グループ: {';'.join(','.join(g) for g in mat_groups)}")
             lines.append("")
 
     return "\n".join(lines)
@@ -3221,6 +3245,10 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     def isolated_ing(ds):
         return entries[ds]['isolated_ingredients']
 
+    def ing_groups(ds):
+        raw = entries[ds].get('ingredient_groups', '')
+        return raw.split(';') if raw else []
+
     def snack_am(ds):
         return entries[ds].get('snack_am', '')
 
@@ -3300,21 +3328,31 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
     # 性質が異なり、「同じ並びの材料がそのまま連続して重複」しているのは
     # どの園・どのルールを選んでいても常にデータ入力ミスと言えるため、
     # 選択中ルールの文言（check_same_day_dup）に関係なく常時実行する。
-    for ds in sorted_dates:
-        i_text = ing(ds)
-        toks = _split_ing(i_text)
-
+    def _find_consec_dup(toks):
         for k in (2, 3, 4):
-            dup_seq = None
             for i in range(len(toks) - 2 * k + 1):
                 if toks[i:i + k] == toks[i + k:i + 2 * k]:
-                    dup_seq = toks[i:i + k]
+                    return toks[i:i + k]
+        return None
+
+    for ds in sorted_dates:
+        groups_raw = ing_groups(ds)
+        if groups_raw:
+            # 横並び形式では、空白行で区切られた別々のレシピが偶然同じ並びの
+            # 材料を使っているだけのケースがある（例：みのべ幼稚園様11/16、
+            # フルーツヨーグルトの「黄桃缶,砂糖」と、別まとまりの「黄桃缶,砂糖」）。
+            # グループをまたいだ一致は誤検知になるため、グループ内のみで判定する。
+            dup_seq = None
+            for g in groups_raw:
+                dup_seq = _find_consec_dup(_split_ing(g))
+                if dup_seq:
                     break
-            if dup_seq:
-                day_ngs[ds].append(
-                    f'● 材料「{"、".join(dup_seq)}」が連続して重複入力されている可能性（コピペミスの疑い）'
-                )
-                break
+        else:
+            dup_seq = _find_consec_dup(_split_ing(ing(ds)))
+        if dup_seq:
+            day_ngs[ds].append(
+                f'● 材料「{"、".join(dup_seq)}」が連続して重複入力されている可能性（コピペミスの疑い）'
+            )
 
     if check_imo or check_same_day_dup:
         for ds in sorted_dates:
@@ -3489,6 +3527,7 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
             ('かに玉',   ['片栗粉']),
             ('から揚げ', ['片栗粉']),
             ('唐揚げ',   ['片栗粉']),
+            ('フライドポテト', ['じゃが芋']),
             ('照り焼き', ['みりん', '醤油']),
             ('蒸しパン', ['ベーキングパウダー', 'BP', 'B.P', '重曹']),
             ('ゼリー',   ['寒天', 'イナアガー', 'アガー', 'ゼラチン']),
