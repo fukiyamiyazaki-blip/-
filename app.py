@@ -3633,6 +3633,31 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                 if kw in iso_text and kw not in ls_text:
                     day_ngs[ds].append(f'● 材料に「{kw}」が単独で入っているが献立名に記載がない（明記漏れの可能性）')
 
+        # ── 献立名「お菓子」のまま、材料欄だけ具体的なレシピになっている ──
+        # 横並び形式では、材料欄は空白行区切りのレシピ単位のまとまり（グループ）で
+        # 出力される。献立名（おやつ）が総称「お菓子」の場合、材料欄も購入品のため
+        # 通常は「お菓子」という同じ語が単独グループとして入るだけ（具体的な食材の
+        # 内訳なし）。ところが「お菓子」単独グループの後ろに、さらに具体的な食材の
+        # グループが続く場合、献立名を具体的な料理名（きな粉トースト等）に更新し
+        # 忘れた記入漏れの可能性が高い（平安女学院大学附属こども園様11/14で確認：
+        # 献立名「お菓子」のまま、材料欄に「お菓子」単独グループ＋「食パン,きな粉,
+        # 砂糖,バター」グループが続いていた。同園の他の土曜は「お菓子」単独グループ
+        # のみで終わっており、材料欄の内訳があるのはこの日だけだった）。
+        # 横並び形式以外（ing_groupsが常に空）では発火しない。
+        for ds in sorted_dates:
+            if snack(ds).strip() != 'お菓子':
+                continue
+            groups = ing_groups(ds)
+            oka_idx = next((i for i, g in enumerate(groups) if g.strip() == 'お菓子'), None)
+            if oka_idx is None:
+                continue
+            extra_groups = groups[oka_idx + 1:]
+            extra_items = [it.strip() for g in extra_groups for it in g.split(',') if it.strip()]
+            if extra_items:
+                day_ngs[ds].append(
+                    f'● 献立名が「お菓子」のままだが、材料欄に具体的な食材（{"・".join(extra_items)}）が記載されている（献立名の記入漏れの可能性）'
+                )
+
         # ── おすまし・おすいものに「みそ」あり ─────────────────────
         for ds in sorted_dates:
             ls_text = lunch(ds) + ' ' + snack(ds)
