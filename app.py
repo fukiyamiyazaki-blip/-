@@ -3596,6 +3596,15 @@ def compute_all_python_ngs(excel_text, rules_text="", leftover_words=None):
                         continue
                     day_ngs[ds].append(f'● 献立名に「{group[0]}」があるが材料に見当たらない（表記が違っていないか要確認）')
 
+        # ── 丼ものなのに材料に米（主食）がない記入漏れ ────────────────
+        # （例：三井中央幼稚園様12/8「豚肉のうま煮丼」なのに材料欄に白米がない）
+        # 麺類（うどん等）はFOOD_SYNONYM_GROUPSで同様に照合済み。
+        _RICE_KW = ['白米', '七分付き米', '七分づき米', '精白米', '米', 'ご飯', 'ごはん', '麦飯']
+        for ds in sorted_dates:
+            l_text = lunch(ds)
+            if '丼' in l_text and not any(k in ing(ds) for k in _RICE_KW):
+                day_ngs[ds].append('● 献立名に「丼」があるが材料に白米（ご飯）なし')
+
         # ── 材料に果物があるのに献立名に記載がない（逆方向の表記漏れ）─────
         # この園が普段「献立名に果物を明記する」運用かをファイル内で判定し、
         # その運用が支配的な場合にだけ外れ値（記載漏れ）として報告する。
